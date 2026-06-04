@@ -1,6 +1,0 @@
-apiVersion: v2
-name: otel-collector
-description: OTel Collector DaemonSet for application clusters — collects logs, traces, metrics and Hubble network flows, forwards to cluster1
-version: 0.1.0
-appVersion: "0.148.0"
-type: application
