@@ -1,15 +1,13 @@
 # =============================================================================
-# E2E OTel Collector — VM config template
+# E2E OTel Collector — VM config
 # =============================================================================
-# Copy to /etc/e2e-otel-collector/config.yaml and fill in the REQUIRED values.
+# Deployed to /etc/e2e-otel-collector/config.yaml by the install script.
 #
 # Required env vars (set in /etc/e2e-otel-collector/env):
-#   HOST_NAME                 — this VM's hostname (used as log stream name)
-#   CLUSTER_INGESTION_TOKEN   — from CreateLogGroup or ClickHouse logs.log_groups
-#
-# What this ships:
-#   Logs    → journald (clean message only) + syslog files + optional app logs
-#   Metrics → CPU / memory / disk / network → otel-gateway
+#   HOST_NAME        — this VM's hostname
+#   E2E_TOKEN        — ingestion token from the register API
+#   E2E_LOG_GROUP    — log group name (e.g. logs.infra.vm.1016)
+#   E2E_PROJECT_ID   — E2E project ID
 # =============================================================================
 
 extensions:
@@ -23,43 +21,28 @@ extensions:
       directory: /var/lib/e2e-otel-collector/tmp
 
 receivers:
-  # ── Systemd journal — all services on this VM ─────────────────────────────
-  # The journald receiver delivers the raw journal entry as a JSON blob.
-  # Operators below: parse the JSON, extract the human-readable MESSAGE as the
-  # log body, promote SYSLOG_IDENTIFIER as the service name, discard the rest.
+  # ── Systemd journal ───────────────────────────────────────────────────────
   journald:
     directory: /run/log/journal
     priority: info
     operators:
-      # The journald receiver already parses the journal entry into a map.
-      # body is a map[string]interface{} with keys like MESSAGE, SYSLOG_IDENTIFIER, etc.
-
-      # 1. Promote useful fields to attributes before discarding the map
       - type: copy
         from: body.SYSLOG_IDENTIFIER
         to: attributes["service.name"]
-
       - type: copy
         from: body.PRIORITY
         to: attributes["syslog.priority"]
-
       - type: copy
         from: body._SYSTEMD_UNIT
         to: attributes["systemd.unit"]
-
-      # 2. Replace the map body with just the human-readable MESSAGE string
       - type: move
         from: body.MESSAGE
         to: body
-
-      # 3. Stamp host.name resource attribute
       - type: add
         field: resource["host.name"]
         value: "${env:HOST_NAME}"
 
-  # ── Syslog / auth file logs ────────────────────────────────────────────────
-  # AlmaLinux writes to /var/log/messages (general) and /var/log/secure (auth).
-  # multiline.line_start_pattern joins continuation lines (rare in syslog but safe).
+  # ── Syslog / auth files ───────────────────────────────────────────────────
   filelog/syslog:
     include:
       - /var/log/messages
@@ -69,17 +52,13 @@ receivers:
     include_file_path: true
     include_file_name: false
     multiline:
-      # Each syslog entry starts with "Mon DD HH:MM:SS" e.g. "Apr  9 22:50:44"
       line_start_pattern: '^[A-Z][a-z]{2} +[0-9]+ [0-9]{2}:[0-9]{2}:[0-9]{2}'
     operators:
       - type: add
         field: resource["host.name"]
         value: "${env:HOST_NAME}"
 
-  # ── Application / Python log files ────────────────────────────────────────
-  # Python's logging module writes entries starting with a timestamp.
-  # Multiline tracebacks are joined to the preceding entry automatically.
-  # Add your app's log paths to the include list.
+  # ── Application logs ──────────────────────────────────────────────────────
   filelog/app:
     include:
       - /var/log/app/*.log
@@ -91,15 +70,13 @@ receivers:
     include_file_path: true
     include_file_name: false
     multiline:
-      # New log entry starts with an ISO timestamp "2026-04-09 23:28:54"
-      # Lines starting with spaces/tabs (traceback frames) are continuation lines.
       line_start_pattern: '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'
     operators:
       - type: add
         field: resource["host.name"]
         value: "${env:HOST_NAME}"
 
-  # ── Host OS metrics ────────────────────────────────────────────────────────
+  # ── Host OS metrics ───────────────────────────────────────────────────────
   hostmetrics:
     collection_interval: 30s
     scrapers:
@@ -135,6 +112,12 @@ processors:
       - key: host.name
         value: "${env:HOST_NAME}"
         action: upsert
+      - key: log_group
+        value: "${env:E2E_LOG_GROUP}"
+        action: upsert
+      - key: project_id
+        value: "${env:E2E_PROJECT_ID}"
+        action: upsert
 
   batch:
     timeout: 1s
@@ -142,13 +125,12 @@ processors:
     send_batch_max_size: 1024
 
 exporters:
-  # ── Metrics → otel-gateway on cluster1 ────────────────────────────────────
   otlp/gateway:
-    endpoint: "172.16.230.168:31318"        # REQUIRED: otel-gateway NodePort
+    endpoint: "172.16.230.168:31318"
     tls:
       insecure: true
     headers:
-      authorization: "Bearer ${env:CLUSTER_INGESTION_TOKEN}"
+      authorization: "Bearer ${env:E2E_TOKEN}"
     retry_on_failure:
       enabled: true
       initial_interval: 5s
