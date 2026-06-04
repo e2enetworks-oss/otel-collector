@@ -43,12 +43,12 @@ jobs:
             cgo_enabled: "0"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
-          cache: true
+          cache: false   # go.sum doesn't exist until OCB generates it at build time
 
       # journaldreceiver links against libsystemd — only needed for Linux CGO builds
       - name: Install libsystemd-dev
@@ -76,7 +76,7 @@ jobs:
             -o "${{ github.workspace }}/releases/latest/${{ matrix.binary_name }}" \
             .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.binary_name }}
           path: releases/latest/${{ matrix.binary_name }}
@@ -91,9 +91,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts/
           merge-multiple: true
