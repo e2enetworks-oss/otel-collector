@@ -1,0 +1,89 @@
+{{- if .Values.networkPolicy.enabled }}
+# Deny all ingress + egress by default.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: otel-collector-deny-all
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "otel-collector.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: otel-collector
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: otel-collector-allow-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "otel-collector.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: otel-collector
+  policyTypes:
+    - Ingress
+  ingress:
+    {{- if .Values.otlp.enabled }}
+    # OTLP from application pods in any namespace (SDK auto-instrumentation)
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.otlp.grpc.port }}
+        - protocol: TCP
+          port: {{ .Values.otlp.http.port }}
+    {{- end }}
+    # Health check
+    - ports:
+        - protocol: TCP
+          port: 13133
+    {{- if .Values.monitoring.serviceMonitor.enabled }}
+    # Prometheus scrape (metrics endpoint)
+    - ports:
+        - protocol: TCP
+          port: 8888
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: otel-collector-allow-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "otel-collector.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: otel-collector
+  policyTypes:
+    - Egress
+  egress:
+    # Cluster 1 OTel Gateway (traces + metrics) — NodePort on cluster1
+    - ports:
+        - protocol: TCP
+          port: 31318
+    # kubelet stats API on every node (port 10250)
+    - ports:
+        - protocol: TCP
+          port: 10250
+    # Kubernetes API server (k8sattributes processor)
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

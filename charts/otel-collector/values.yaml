@@ -1,0 +1,107 @@
+# Production defaults — override per region in values/<region>-otel-collector.yaml
+
+# Cluster identity — stamped on every log/metric/trace resource.
+# REQUIRED: set this in per-region values file.
+cluster:
+  # REQUIRED — set in your per-environment values file (e.g. delhi-dev-otel-collector.yaml)
+  # e.g. cluster2, cluster3, cluster4
+  name: ""
+
+image: registry.e2enetworks.net/infra/e2e-otel-collector:latest
+imagePullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Required for host log tailing on many distros where /var/log/pods is 750 root:root.
+# Keep this enabled for k8s filelog collection unless node permissions are relaxed.
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  runAsNonRoot: false
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "200Mi"
+  limits:
+    cpu: "500m"
+    memory: "500Mi"
+
+# Cluster 1 endpoints — REQUIRED, set in per-environment values file.
+# forwarder: Vector Forwarder NodePort (logs via OTLP gRPC)
+# gateway:   OTel Gateway NodePort    (traces + metrics via OTLP gRPC)
+gateway:
+  endpoint: ""
+  # tokenSecret: set to inject a per-cluster ingestion token into the Authorization header.
+  # Required when the gateway enforces auth (fail_mode: closed).
+  # Example:
+  #   tokenSecret:
+  #     name: cluster-ingestion-token
+  #     key: token
+  tokenSecret: {}
+
+# OTLP receiver — accepts traces + metrics from application SDKs running in this cluster.
+# Exposes ports 4317 (gRPC) and 4318 (HTTP) on every node via the DaemonSet hostPort.
+otlp:
+  enabled: true
+  grpc:
+    port: 4317
+    maxRecvMsgSizeMib: 16
+  http:
+    port: 4318
+
+# Log collection — multiple sources can be active simultaneously.
+logs:
+  enabled: true
+
+  # K8s container logs via filelog receiver (tails /var/log/pods/*/*/*.log).
+  # Disable on VMs that don't have K8s.
+  kubernetes:
+    enabled: true
+    # Additional multiline recombine patterns (INCOMING/OUTGOING/JSON are always included).
+    # Add app-specific patterns here, e.g. "^ERROR" for custom prefixes.
+    extraRecombinePatterns: []
+
+  # Custom file paths — for VM application logs.
+  # Enable on VMs with app logs written to disk.
+  files:
+    enabled: false
+    paths: []
+    # - /var/log/myapp/*.log
+
+  # Systemd journal — for VM systemd service logs (AlmaLinux, Ubuntu, RHEL, Debian).
+  # Enable on VMs; disable on K8s nodes unless explicitly needed.
+  journald:
+    enabled: false
+    # Filter to specific units (leave empty for all):
+    units: []
+    # - kubelet
+    # - docker
+
+# Hubble network flow collection (requires Cilium with Hubble enabled on the node).
+hubble:
+  enabled: true
+
+# Host OS metrics (CPU, memory, disk, network, load, filesystem).
+hostmetrics:
+  enabled: true
+  collectionInterval: 30s
+
+# Kubernetes pod + container resource metrics via kubelet stats API.
+kubeletstats:
+  enabled: true
+  collectionInterval: 30s
+
+# k8sattributes processor — enriches signals with live K8s pod metadata.
+k8sattributes:
+  enabled: true
+
+networkPolicy:
+  enabled: true
+
+filter:
+  dropPatterns: []
+
+monitoring:
+  serviceMonitor:
+    enabled: false
+    interval: "15s"

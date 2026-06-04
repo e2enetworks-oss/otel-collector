@@ -1,0 +1,8 @@
+# Minimal values for CI helm template validation only.
+# Not used in any real deployment.
+cluster:
+  name: "ci-test"
+
+gateway:
+  endpoint: "127.0.0.1:31318"
+

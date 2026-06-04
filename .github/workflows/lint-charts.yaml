@@ -1,0 +1,33 @@
+name: Lint Helm Charts
+
+on:
+  push:
+    branches: [main, otel-collector]
+    paths:
+      - 'charts/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'charts/**'
+    paths:
+      - 'charts/**'
+
+jobs:
+  lint:
+    name: Helm lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: '3.x'
+
+      - name: Lint charts
+        run: |
+          for chart in charts/*/; do
+            echo "Linting $chart"
+            helm lint "$chart" --values "$chart/ci/values.yaml"
+          done

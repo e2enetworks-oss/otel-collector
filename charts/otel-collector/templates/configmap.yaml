@@ -1,0 +1,325 @@
+{{- if not .Values.gateway.endpoint }}
+{{- fail "otel-collector: .Values.gateway.endpoint is required" }}
+{{- end }}
+{{- if not .Values.cluster.name }}
+{{- fail "otel-collector: .Values.cluster.name is required" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "otel-collector.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    extensions:
+      health_check:
+        endpoint: "0.0.0.0:13133"
+
+    receivers:
+      {{- if .Values.otlp.enabled }}
+      # ── OTLP: app SDK traces + metrics ───────────────────────────────────────
+      otlp:
+        protocols:
+          grpc:
+            endpoint: "0.0.0.0:{{ .Values.otlp.grpc.port }}"
+            max_recv_msg_size_mib: {{ .Values.otlp.grpc.maxRecvMsgSizeMib }}
+          http:
+            endpoint: "0.0.0.0:{{ .Values.otlp.http.port }}"
+            cors:
+              allowed_origins: ["*"]
+      {{- end }}
+
+      {{- if and .Values.logs.enabled .Values.logs.kubernetes.enabled }}
+      # ── K8s container logs via filelog ────────────────────────────────────────
+      filelog/k8s:
+        include:
+          - /var/log/pods/*/*/*.log
+        exclude:
+          - /var/log/pods/{{ .Release.Namespace }}_otel-collector*/*/*.log
+        # end (not beginning): bbolt doesn't flush the read-offset checkpoint on SIGKILL,
+        # so 'beginning' causes duplicate bursts on restart that overflow the dedup LRU window.
+        # Trade-off: logs written during a crash gap are permanently skipped (gaps vs duplicates).
+        # The Vector aggregator's dedup transform is the compensating control for graceful restarts.
+        start_at: end
+        include_file_path: true
+        include_file_name: false
+        operators:
+          - type: regex_parser
+            id: parse_cri
+            regex: '^(?P<time>[^ ]+) (?P<stream>stdout|stderr) (?P<flags>[^ ]*) (?P<log>.*)$'
+            timestamp:
+              parse_from: attributes.time
+              layout_type: gotime
+              layout: '2006-01-02T15:04:05.999999999Z07:00'
+          - type: move
+            from: attributes.log
+            to: body
+          {{- $extra := "" -}}
+          {{- range .Values.logs.kubernetes.extraRecombinePatterns -}}
+          {{- $extra = printf "%s|%s" $extra . -}}
+          {{- end -}}
+          {{- $recombinePattern := printf `^(INCOMING|OUTGOING|[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+|{%s)` $extra }}
+          - type: recombine
+            id: recombine_multiline
+            combine_field: body
+            is_first_entry: 'body matches "{{ $recombinePattern }}"'
+            source_identifier: attributes["log.file.path"]
+            max_log_size: 102400
+            force_flush_period: 5s
+          - type: regex_parser
+            id: parse_k8s_path
+            parse_from: attributes["log.file.path"]
+            regex: '^/var/log/pods/(?P<namespace>[^_]+)_(?P<pod_name>[^_]+)_(?P<pod_uid>[^/]+)/(?P<container_name>[^/]+)/\d+\.log$'
+            on_error: send_quiet
+          - type: move
+            from: attributes.namespace
+            to: resource["k8s.namespace.name"]
+          - type: move
+            from: attributes.pod_name
+            to: resource["k8s.pod.name"]
+          - type: move
+            from: attributes.pod_uid
+            to: resource["k8s.pod.uid"]
+          - type: move
+            from: attributes.container_name
+            to: resource["k8s.container.name"]
+          - type: add
+            field: resource["k8s.cluster.name"]
+            value: "{{ .Values.cluster.name }}"
+      {{- end }}
+
+      {{- if and .Values.logs.enabled .Values.logs.files.enabled }}
+      # ── VM / custom file paths ────────────────────────────────────────────────
+      filelog/vm:
+        include:
+          {{- range .Values.logs.files.paths }}
+          - {{ . }}
+          {{- end }}
+        start_at: beginning
+        include_file_path: true
+        include_file_name: false
+        operators:
+          - type: add
+            field: resource["host.name"]
+            value: "${env:HOST_NAME}"
+          - type: add
+            field: resource["k8s.cluster.name"]
+            value: "{{ .Values.cluster.name }}"
+      {{- end }}
+
+      {{- if and .Values.logs.enabled .Values.logs.journald.enabled }}
+      # ── Journald (systemd VMs) ────────────────────────────────────────────────
+      journald:
+        directory: /run/log/journal
+        {{- if .Values.logs.journald.units }}
+        units:
+          {{- range .Values.logs.journald.units }}
+          - {{ . }}
+          {{- end }}
+        {{- end }}
+        priority: info
+        operators:
+          - type: add
+            field: resource["host.name"]
+            value: "${env:HOST_NAME}"
+          - type: add
+            field: resource["k8s.cluster.name"]
+            value: "{{ .Values.cluster.name }}"
+      {{- end }}
+
+      {{- if .Values.hostmetrics.enabled }}
+      # ── Host OS metrics (K8s nodes + VMs) ────────────────────────────────────
+      hostmetrics:
+        collection_interval: {{ .Values.hostmetrics.collectionInterval }}
+        root_path: /hostfs
+        scrapers:
+          cpu:
+            metrics:
+              system.cpu.utilization:
+                enabled: true
+          memory:
+            metrics:
+              system.memory.utilization:
+                enabled: true
+          disk: {}
+          network: {}
+          load: {}
+          filesystem:
+            exclude_mount_points:
+              mount_points: ["/dev/*", "/proc/*", "/sys/*", "/run/k3s/*"]
+              match_type: regexp
+            exclude_fs_types:
+              fs_types: [autofs, binfmt_misc, bpf, cgroup2, configfs, debugfs,
+                         devpts, devtmpfs, fusectl, hugetlbfs, iso9660, mqueue,
+                         nsfs, overlay, proc, procfs, pstore, rpc_pipefs,
+                         securityfs, selinuxfs, squashfs, sysfs, tracefs]
+              match_type: strict
+      {{- end }}
+
+      {{- if .Values.kubeletstats.enabled }}
+      # ── K8s pod + container metrics ───────────────────────────────────────────
+      kubeletstats:
+        collection_interval: {{ .Values.kubeletstats.collectionInterval }}
+        auth_type: serviceAccount
+        endpoint: "https://${K8S_NODE_IP}:10250"
+        insecure_skip_verify: true
+        metric_groups: [node, pod, container]
+      {{- end }}
+
+      {{- if .Values.hubble.enabled }}
+      # ── Hubble network flow events (Cilium) ───────────────────────────────────
+      filelog/hubble:
+        include:
+          - /var/run/cilium/hubble/events.log
+        start_at: end
+        operators:
+          - type: add
+            field: attributes.log_type
+            value: "network_flow"
+          - type: add
+            field: resource["k8s.cluster.name"]
+            value: "{{ .Values.cluster.name }}"
+          - type: add
+            field: resource["k8s.node.name"]
+            value: "${K8S_NODE_NAME}"
+      {{- end }}
+
+    processors:
+      {{- if .Values.k8sattributes.enabled }}
+      # K8s only — enriches signals with live pod/deployment metadata.
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.node.name
+            - k8s.container.name
+            - k8s.deployment.name
+            - k8s.statefulset.name
+            - k8s.daemonset.name
+          # Marketplace tenant identity lives on the deployment's NAMESPACE labels
+          # (see engine/activities/namespace_activities.py — namespace name is
+          # cust-<id[:8]>-<app>-<dep[:8]> but labels carry the FULL UUIDs).
+          # Promoting these to resource attributes gives downstream pipelines
+          # the full customer UUID for clean joins to MarketplaceCustomer.id,
+          # instead of just the 8-char prefix you'd get from regex-parsing the
+          # namespace name.
+          labels:
+            - tag_name: customer_id
+              key: customer_id
+              from: namespace
+            - tag_name: app_name
+              key: app_name
+              from: namespace
+            - tag_name: deployment_id
+              key: deployment_id
+              from: namespace
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.uid
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.name
+              - from: resource_attribute
+                name: k8s.namespace.name
+      {{- end }}
+
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 400
+        spike_limit_mib: 100
+
+      # Stamps node/host identity onto infra signal resources.
+      resource/node:
+        attributes:
+          - key: k8s.node.name
+            value: "${K8S_NODE_NAME}"
+            action: upsert
+          - key: host.name
+            value: "${HOST_NAME}"
+            action: upsert
+
+      batch:
+        timeout: 5s
+        send_batch_size: 512
+        send_batch_max_size: 1024
+
+      batch/flows:
+        timeout: 3s
+        send_batch_size: 256
+        send_batch_max_size: 512
+
+      {{- if .Values.filter.dropPatterns }}
+      filter/drop:
+        error_mode: ignore
+        logs:
+          log_record:
+            {{- range .Values.filter.dropPatterns }}
+            - {{ . | quote }}
+            {{- end }}
+      {{- end }}
+
+    exporters:
+      # ── Traces + Metrics → otel-gateway on cluster1 ───────────────────────────
+      otlp/gateway:
+        endpoint: "{{ .Values.gateway.endpoint }}"
+        tls:
+          insecure: true
+        {{- if .Values.gateway.tokenSecret }}
+        headers:
+          authorization: "Bearer ${env:CLUSTER_INGESTION_TOKEN}"
+        {{- end }}
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+        sending_queue:
+          enabled: true
+          num_consumers: 4
+          queue_size: 1000
+
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        {{- if .Values.otlp.enabled }}
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter{{ if .Values.k8sattributes.enabled }}, k8sattributes{{ end }}, batch]
+          exporters: [otlp/gateway]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlp/gateway]
+        {{- end }}
+        {{- if or .Values.hostmetrics.enabled .Values.kubeletstats.enabled }}
+        metrics/infrastructure:
+          receivers: [{{ if .Values.hostmetrics.enabled }}hostmetrics{{ end }}{{ if and .Values.hostmetrics.enabled .Values.kubeletstats.enabled }}, {{ end }}{{ if .Values.kubeletstats.enabled }}kubeletstats{{ end }}]
+          processors: [memory_limiter, resource/node, batch]
+          exporters: [otlp/gateway]
+        {{- end }}
+        {{- if .Values.logs.enabled }}
+        {{- $logReceivers := list }}
+        {{- if .Values.logs.kubernetes.enabled }}{{ $logReceivers = append $logReceivers "filelog/k8s" }}{{- end }}
+        {{- if .Values.logs.files.enabled }}{{ $logReceivers = append $logReceivers "filelog/vm" }}{{- end }}
+        {{- if .Values.logs.journald.enabled }}{{ $logReceivers = append $logReceivers "journald" }}{{- end }}
+        {{- if $logReceivers }}
+        logs:
+          receivers: [{{ join ", " $logReceivers }}]
+          processors: [memory_limiter{{ if .Values.filter.dropPatterns }}, filter/drop{{ end }}{{ if .Values.k8sattributes.enabled }}, k8sattributes{{ end }}, batch]
+          exporters: [otlp/gateway]
+        {{- end }}
+        {{- if .Values.hubble.enabled }}
+        logs/flows:
+          receivers: [filelog/hubble]
+          processors: [memory_limiter, batch/flows]
+          exporters: [otlp/gateway]
+        {{- end }}
+        {{- end }}
