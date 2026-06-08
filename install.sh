@@ -15,7 +15,6 @@ SERVICE_NAME="e2e-otel-collector"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 CDN_BASE="https://observability.objectstore.e2enetworks.net/collector"
-BINARY_RELEASE_NAME="e2e-otel-collector-linux"
 REGISTER_API="https://obs.e2enetworks.net/v1/install/register"
 FALLBACK_BINARY_VERSION="0.152.1"
 
@@ -47,6 +46,7 @@ case "$ARCH" in
 esac
 
 OS_ID=""
+# shellcheck source=/dev/null
 [ -f /etc/os-release ] && OS_ID=$(. /etc/os-release && echo "${ID:-unknown}")
 info "Platform: linux/${ARCH} (${OS_ID:-unknown distro})"
 
