@@ -1,4 +1,4 @@
-name: Build OTel Collector
+name: Build E2E OTel Collector
 
 on:
   push:
@@ -21,7 +21,7 @@ jobs:
             goarch: amd64
             builder_config: builder-config.yaml
             dist_dir: dist
-            binary_name: otelcol-linux-amd64
+            binary_name: e2e-otel-collector-linux-amd64
             cgo_enabled: "1"
 
           # ── Linux ARM64 — native CGO on GitHub's ARM64 runner
@@ -30,7 +30,7 @@ jobs:
             goarch: arm64
             builder_config: builder-config.yaml
             dist_dir: dist
-            binary_name: otelcol-linux-arm64
+            binary_name: e2e-otel-collector-linux-arm64
             cgo_enabled: "1"
 
           # ── Windows x86_64 — cross-compiled from Linux; journaldreceiver excluded
@@ -39,7 +39,7 @@ jobs:
             goarch: amd64
             builder_config: builder-config-windows.yaml
             dist_dir: dist-win
-            binary_name: otelcol-windows-amd64.exe
+            binary_name: e2e-otel-collector-windows-amd64.exe
             cgo_enabled: "0"
 
     steps:
@@ -48,19 +48,37 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
-          cache: false   # go.sum doesn't exist until OCB generates it at build time
+          cache: false
 
-      # journaldreceiver links against libsystemd — only needed for Linux CGO builds
-      - name: Install libsystemd-dev
-        if: matrix.cgo_enabled == '1'
-        run: sudo apt-get update -q && sudo apt-get install -y libsystemd-dev
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y protobuf-compiler
+          if [ "${{ matrix.cgo_enabled }}" = "1" ]; then
+            sudo apt-get install -y libsystemd-dev
+          fi
 
-      - name: Install OTel Collector Builder (ocb)
-        run: go install go.opentelemetry.io/collector/cmd/builder@v0.148.0
+      - name: Install Go protoc plugins and OCB
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
+          go install go.opentelemetry.io/collector/cmd/builder@v0.148.0
 
-      # OCB reads the manifest and generates go.mod / main.go / components.go
-      # in the output_path directory. --skip-compilation=true so we control
-      # GOOS / GOARCH / CGO_ENABLED in the next step ourselves.
+      - name: Generate proto stubs for pushlogs_exporter
+        working-directory: collector
+        run: |
+          protoc \
+            --go_out=extensions/pushlogs_exporter \
+            --go_opt=paths=source_relative \
+            --go-grpc_out=extensions/pushlogs_exporter \
+            --go-grpc_opt=paths=source_relative \
+            -I extensions/pushlogs_exporter \
+            extensions/pushlogs_exporter/proto/ingest.proto
+
+      - name: Tidy pushlogs_exporter module
+        working-directory: collector/extensions/pushlogs_exporter
+        run: go mod tidy
+
       - name: Generate Go source with OCB
         working-directory: collector
         run: builder --config=${{ matrix.builder_config }} --skip-compilation=true
@@ -103,7 +121,7 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            artifacts/otelcol-linux-amd64
-            artifacts/otelcol-linux-arm64
-            artifacts/otelcol-windows-amd64.exe
+            artifacts/e2e-otel-collector-linux-amd64
+            artifacts/e2e-otel-collector-linux-arm64
+            artifacts/e2e-otel-collector-windows-amd64.exe
             releases/latest/vm-config.yaml

@@ -1,104 +1,103 @@
-# E2E OTel Collector
+# E2E Observability Agent
 
-Custom OpenTelemetry Collector distribution for E2E Networks — collects logs, metrics, and traces from Linux VMs and Kubernetes clusters, and forwards them to the E2E observability platform.
-
-## What's in this repo
-
-| Path | Purpose |
-|------|---------|
-| `collector/builder-config.yaml` | OCB manifest for Linux builds (includes journaldreceiver) |
-| `collector/builder-config-windows.yaml` | OCB manifest for Windows builds (journaldreceiver excluded) |
-| `charts/otel-collector/` | Helm chart for Kubernetes DaemonSet deployment |
-| `releases/latest/vm-config.yaml` | OTel Collector config template for VM deployments |
-
-## Deployment
-
-### Linux / Windows VM
-
-1. Download the binary for your platform from [Releases](../../releases/latest):
-   - `otelcol-linux-amd64` — Linux x86_64
-   - `otelcol-linux-arm64` — Linux ARM64
-   - `otelcol-windows-amd64.exe` — Windows x86_64
-
-2. Install the binary:
-   ```bash
-   sudo install -o root -g root -m 0755 otelcol-linux-amd64 /usr/local/bin/e2e-otel-collector
-   ```
-
-3. Drop the config in place:
-   ```bash
-   sudo mkdir -p /etc/e2e-otel-collector
-   sudo cp vm-config.yaml /etc/e2e-otel-collector/config.yaml
-   ```
-
-4. Set required environment variables in `/etc/e2e-otel-collector/env`:
-   ```
-   HOST_NAME=<this-vm-hostname>
-   CLUSTER_INGESTION_TOKEN=<token-from-CreateLogGroup>
-   ```
-
-5. Install and start the systemd service:
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now e2e-otel-collector
-   ```
-
-What it collects on a VM: systemd journal logs, syslog/auth files, app logs under `/var/log/`, and host OS metrics (CPU, memory, disk, network).
+Install the E2E Observability Agent on your Linux VM to start collecting logs and metrics in your E2E dashboard within 2 minutes.
 
 ---
 
-### Kubernetes (Helm)
+## Requirements
 
-```bash
-helm install otel-collector ./charts/otel-collector \
-  --namespace e2e-monitoring --create-namespace \
-  --set cluster.name=cluster2 \
-  --set gateway.endpoint="<otel-gateway-nodeport-ip>:31318" \
-  --set gateway.tokenSecret.name=cluster-ingestion-token \
-  --set gateway.tokenSecret.key=token
-```
-
-Key values:
-
-| Value | Required | Description |
-|-------|----------|-------------|
-| `cluster.name` | Yes | Cluster identifier stamped on all signals (e.g. `cluster2`) |
-| `gateway.endpoint` | Yes | OTel Gateway NodePort address |
-| `gateway.tokenSecret` | No | K8s secret containing the ingestion token |
-
-The chart deploys a DaemonSet that collects: container logs via filelog, host metrics, kubelet stats, OTLP traces/metrics from app SDKs, and Hubble network flows (if Cilium is enabled).
+- Linux VM (x86_64 or ARM64)
+- Running as **root**
+- `curl` installed
+- systemd-based OS (Ubuntu, AlmaLinux, RHEL, Debian, etc.)
 
 ---
 
-## CI / CD
+## Install
 
-| Workflow | Trigger | What it does |
-|----------|---------|-------------|
-| `release.yaml` | Push to `main`/`otel-collector`, or `v*` tag | Builds binaries for linux/amd64, linux/arm64, windows/amd64. Creates a GitHub Release on `v*` tags. |
-| `gitleaks.yml` | Push / PR | Scans for leaked secrets |
-| `lint-charts.yaml` | Push / PR touching `charts/**` | Runs `helm lint` on the chart |
-
-To ship a release:
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+E2E_API_KEY=<your-api-key> \
+E2E_PROJECT_ID=<your-project-id> \
+E2E_CUSTOMER_ID=<your-customer-id> \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/e2enetworks-oss/otel-collector/main/install.sh)"
 ```
 
-The pipeline builds all three binaries and attaches them to the GitHub Release along with `vm-config.yaml`.
+| Variable | Where to find it |
+|---|---|
+| `E2E_API_KEY` | MyAccount → API IAM |
+| `E2E_PROJECT_ID` | MyAccount → Projects |
+| `E2E_CUSTOMER_ID` | MyAccount → Profile |
 
-## Build
+The install command is **idempotent** — safe to re-run on the same VM to update or repair the agent.
 
-Binaries are built using the [OTel Collector Builder (ocb)](https://github.com/open-telemetry/opentelemetry-collector/tree/main/cmd/builder). The Linux binary includes `journaldreceiver` (systemd journal, Linux/CGO only). The Windows binary excludes it since Windows has no systemd.
+---
 
-To build locally:
+## What Gets Collected
+
+| Data | Source |
+|---|---|
+| CPU utilization | `/proc/stat` — per core, every 30s |
+| Memory utilization | `/proc/meminfo` — every 30s |
+| Disk I/O | `/proc/diskstats` — every 30s |
+| Network I/O | `/proc/net/dev` — every 30s |
+| Filesystem usage | `statfs()` — every 30s |
+| Load average | `/proc/loadavg` — every 30s |
+| Systemd journal logs | All services on the VM |
+| Syslog / auth logs | `/var/log/messages`, `/var/log/secure` |
+| Application logs | `/var/log/app/*.log`, `/var/log/python/*.log` |
+
+---
+
+## What You See in the Dashboard
+
+Within 2 minutes of install, your VM appears in:
+
+- **Grafana → Observability → Host Metrics** — CPU, memory, disk, network, filesystem panels
+- **Grafana → Logging → OTel Logs** — all systemd and syslog entries, filterable by host
+
+---
+
+## Manage the Agent
+
 ```bash
-go install go.opentelemetry.io/collector/cmd/builder@v0.148.0
+# Check status
+systemctl status e2e-otel-collector
 
-# Linux
-cd collector && builder --config=builder-config.yaml --skip-compilation=true
-cd dist && CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -o e2e-otel-collector .
+# Stream live agent logs
+journalctl -u e2e-otel-collector -f
 
-# Windows (cross-compile from Linux)
-cd collector && builder --config=builder-config-windows.yaml --skip-compilation=true
-cd dist-win && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o e2e-otel-collector.exe .
+# Check health
+curl -s http://localhost:13133
+
+# Restart after a config change
+systemctl restart e2e-otel-collector
+
+# Stop and disable
+systemctl stop e2e-otel-collector
+systemctl disable e2e-otel-collector
+```
+
+---
+
+## Files Installed on the VM
+
+```
+/usr/local/bin/e2e-otelcol                        ← agent binary
+/etc/e2e-otel-collector/config.yaml               ← pipeline config
+/etc/e2e-otel-collector/env                        ← credentials (root-only)
+/etc/systemd/system/e2e-otel-collector.service     ← systemd unit
+/var/lib/e2e-otel-collector/                       ← state and checkpoints
+```
+
+---
+
+## Uninstall
+
+```bash
+systemctl stop e2e-otel-collector
+systemctl disable e2e-otel-collector
+rm -f /usr/local/bin/e2e-otelcol
+rm -rf /etc/e2e-otel-collector
+rm -f /etc/systemd/system/e2e-otel-collector.service
+systemctl daemon-reload
 ```

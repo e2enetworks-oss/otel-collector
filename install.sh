@@ -15,6 +15,7 @@ SERVICE_NAME="e2e-otel-collector"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 CDN_BASE="https://observability.objectstore.e2enetworks.net/collector"
+BINARY_RELEASE_NAME="e2e-otel-collector-linux"
 REGISTER_API="https://obs.e2enetworks.net/v1/install/register"
 FALLBACK_BINARY_VERSION="0.152.1"
 
@@ -72,7 +73,7 @@ info "Registered. Log group: ${E2E_LOG_GROUP}"
 # ── Phase 3: Download Binary ──────────────────────────────────────────────────
 info "Downloading OTel Collector binary (linux/${ARCH})..."
 
-BINARY_URL="${CDN_BASE}/otelcol-linux-${ARCH}"
+BINARY_URL="${CDN_BASE}/e2e-otel-collector-linux-${ARCH}"
 BINARY_TMP="${BINARY_PATH}.tmp"
 
 mkdir -p "$(dirname "${BINARY_PATH}")"
