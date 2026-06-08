@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# Built release binaries — these are produced by GitHub Actions, not committed
+releases/latest/otelcol-*
+
 # Test binary, built with `go test -c`
 *.test
 

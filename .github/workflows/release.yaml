@@ -1,0 +1,108 @@
+name: Build E2E OTel Collector
+
+on:
+  push:
+    branches: [main, otel-collector]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: ${{ matrix.binary_name }}
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Linux x86_64 — native CGO (needs libsystemd for journaldreceiver)
+          - runs_on: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            builder_config: builder-config.yaml
+            dist_dir: dist
+            binary_name: e2e-otel-collector-linux-amd64
+            cgo_enabled: "1"
+
+          # ── Linux ARM64 — native CGO on GitHub's ARM64 runner
+          - runs_on: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            builder_config: builder-config.yaml
+            dist_dir: dist
+            binary_name: e2e-otel-collector-linux-arm64
+            cgo_enabled: "1"
+
+          # ── Windows x86_64 — cross-compiled from Linux; journaldreceiver excluded
+          - runs_on: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            builder_config: builder-config-windows.yaml
+            dist_dir: dist-win
+            binary_name: e2e-otel-collector-windows-amd64.exe
+            cgo_enabled: "0"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Install libsystemd-dev
+        if: matrix.cgo_enabled == '1'
+        run: sudo apt-get update -q && sudo apt-get install -y libsystemd-dev
+
+      - name: Install OTel Collector Builder (ocb)
+        run: go install go.opentelemetry.io/collector/cmd/builder@v0.148.0
+
+      - name: Generate Go source with OCB
+        working-directory: collector
+        run: builder --config=${{ matrix.builder_config }} --skip-compilation=true
+
+      - name: Build binary
+        working-directory: collector/${{ matrix.dist_dir }}
+        env:
+          CGO_ENABLED: ${{ matrix.cgo_enabled }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -trimpath \
+            -o "${{ github.workspace }}/releases/latest/${{ matrix.binary_name }}" \
+            .
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.binary_name }}
+          path: releases/latest/${{ matrix.binary_name }}
+          if-no-files-found: error
+
+  # ── Create a GitHub Release when a v* tag is pushed ────────────────────────
+  release:
+    name: GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/e2e-otel-collector-linux-amd64
+            artifacts/e2e-otel-collector-linux-arm64
+            artifacts/e2e-otel-collector-windows-amd64.exe
+            releases/latest/vm-config.yaml

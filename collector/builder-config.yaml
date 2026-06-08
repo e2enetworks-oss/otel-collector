@@ -1,0 +1,57 @@
+# OTel Collector Builder (ocb) manifest — universal app collector
+#
+# Builds e2e-otel-collector-app: a single binary that runs on both
+# Kubernetes (DaemonSet) and Linux VMs (systemd service / Docker).
+# The active components are selected entirely via the config file —
+# no rebuild needed when switching environments.
+
+dist:
+  name: e2e-otel-collector-app
+  description: "E2E Networks universal OTel Collector — K8s + VM"
+  output_path: ./dist
+  otelcol_version: "0.148.0"
+
+extensions:
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension v0.148.0
+  # Persists filelog read offsets to disk so restarts don't re-read already-shipped entries.
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage/filestorage v0.148.0
+
+receivers:
+  # ── Application / SDK ────────────────────────────────────────────────────
+  # Accepts traces + metrics pushed by app SDKs (port 4317/4318).
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.148.0
+
+  # ── Log collection ────────────────────────────────────────────────────────
+  # K8s: tails /var/log/pods/*/*/*.log
+  # VM:  tails any configurable path (e.g. /var/log/app/*.log)
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/filelogreceiver v0.148.0
+
+  # VM: reads systemd journal (AlmaLinux, Ubuntu, RHEL, Debian)
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/journaldreceiver v0.148.0
+
+  # ── Metrics ──────────────────────────────────────────────────────────────
+  # Node OS metrics — works on K8s nodes and bare VMs.
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver v0.148.0
+
+  # K8s pod + container metrics via kubelet stats API.
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kubeletstatsreceiver v0.148.0
+
+  # Scrapes any Prometheus /metrics endpoint (e.g. lustrefs_exporter, node_exporter).
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusreceiver v0.148.0
+
+processors:
+  - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.148.0
+  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.148.0
+
+  # Stamps static resource attributes (cluster name, env, region).
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourceprocessor v0.148.0
+
+  # K8s only: enriches signals with live pod/deployment metadata.
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/k8sattributesprocessor v0.148.0
+
+exporters:
+  # Traces + metrics → otel-gateway on cluster1 (OTLP gRPC).
+  - gomod: go.opentelemetry.io/collector/exporter/otlpexporter v0.148.0
+
+  # Logs → otel-gateway via OTLP gRPC (same exporter as traces + metrics).
+  # The gateway publishes logs to NATS → Vector → ClickHouse.
