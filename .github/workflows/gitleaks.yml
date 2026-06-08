@@ -1,31 +1,31 @@
-name: Gitleaks Secret Scan
+name: gitleaks
 
 on:
-  push:
-    branches: [main, otel-collector]
   pull_request:
-    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  scan:
-    name: Scan for secrets
+  gitleaks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      # Use the gitleaks CLI directly. The gitleaks-action@v2 wrapper requires a
-      # paid GITLEAKS_LICENSE for organization accounts; the binary is free and
-      # scans the full history identically.
-      - name: Install gitleaks
+      - name: Run Gitleaks (official action)
+        uses: gitleaks/gitleaks-action@v2.3.9
         env:
-          GITLEAKS_VERSION: 8.21.2
-        run: |
-          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz gitleaks
-          sudo mv gitleaks /usr/local/bin/
-          gitleaks version
-
-      - name: Scan for secrets
-        run: gitleaks detect --no-banner --redact --verbose --exit-code 1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Required for organization accounts (e2enetworks-oss). Grab a key at
+          # gitleaks.io and store it as the org/repo secret GITLEAKS_LICENSE.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          # Use the latest gitleaks binary so [allowlist] config and rule
+          # defaults stay in sync with what developers run locally.
+          GITLEAKS_VERSION: latest

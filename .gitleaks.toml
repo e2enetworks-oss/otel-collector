@@ -1,0 +1,18 @@
+# Gitleaks config — extends the upstream default ruleset.
+# Mirrors the practice in ~/Projects/usezombie: useDefault = true plus a single
+# merged [allowlist] (singular form, honored by every gitleaks version).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated collector output and deterministic config placeholders"
+paths = [
+  # ocb-generated Go source / build output — synthesized at CI time, not committed secrets.
+  '''(^|/)collector/dist.*''',
+]
+regexTarget = "match"
+regexes = [
+  # Env-var interpolation placeholders in collector configs, e.g. ${env:E2E_TOKEN}
+  # — references resolved at runtime from the mode-600 env file, not literal secrets.
+  '''\$\{env:[A-Z0-9_]+\}''',
+]
