@@ -71,14 +71,15 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
+          mkdir -p "${{ github.workspace }}/dist"
           go build -trimpath \
-            -o "${{ github.workspace }}/releases/latest/${{ matrix.binary_name }}" \
+            -o "${{ github.workspace }}/dist/${{ matrix.binary_name }}" \
             .
 
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.binary_name }}
-          path: releases/latest/${{ matrix.binary_name }}
+          path: dist/${{ matrix.binary_name }}
           if-no-files-found: error
 
   # ── Create a GitHub Release when a v* tag is pushed ────────────────────────
@@ -97,6 +98,16 @@ jobs:
           path: artifacts/
           merge-multiple: true
 
+      - name: Generate SHA256 checksums
+        working-directory: artifacts
+        run: |
+          # Glob over the downloaded artifacts so the list self-maintains when the
+          # build matrix changes. sha256sum exits non-zero if nothing matches, so a
+          # broken artifact download still fails the job loudly.
+          sha256sum e2e-otel-collector-* > checksums.txt
+          echo "── checksums.txt ──"
+          cat checksums.txt
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -105,4 +116,4 @@ jobs:
             artifacts/e2e-otel-collector-linux-amd64
             artifacts/e2e-otel-collector-linux-arm64
             artifacts/e2e-otel-collector-windows-amd64.exe
-            releases/latest/vm-config.yaml
+            artifacts/checksums.txt

@@ -1,0 +1,69 @@
+name: Auto Tag & Changelog on Merge
+
+on:
+  push:
+    branches: [main]
+    # The job pushes a CHANGELOG.md commit back to main. paths-ignore stops
+    # that commit from re-triggering this workflow (no infinite loop), while
+    # still letting the tag push trigger release.yaml normally.
+    paths-ignore:
+      - 'CHANGELOG.md'
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Bump version, changelog, tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compute next patch version
+        id: version
+        run: |
+          LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          LATEST=${LATEST:-v0.0.0}
+          echo "Latest tag: $LATEST"
+
+          MAJOR=$(echo "$LATEST" | cut -d. -f1 | tr -d 'v')
+          MINOR=$(echo "$LATEST" | cut -d. -f2)
+          PATCH=$(echo "$LATEST" | cut -d. -f3)
+          NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+
+          # Capture the exact merged commit. The tag always points here,
+          # regardless of whether the changelog commit/push succeeds — no
+          # history math, no off-by-one risk.
+          MERGE_SHA=$(git rev-parse HEAD)
+
+          echo "Next tag: $NEW_TAG (on $MERGE_SHA)"
+          echo "new_tag=$NEW_TAG"           >> "$GITHUB_OUTPUT"
+          echo "new_version=${NEW_TAG#v}"   >> "$GITHUB_OUTPUT"
+          echo "merge_sha=$MERGE_SHA"       >> "$GITHUB_OUTPUT"
+
+      - name: Tag the merged commit and push
+        run: |
+          git tag "${{ steps.version.outputs.new_tag }}" "${{ steps.version.outputs.merge_sha }}"
+          # Push the tag → triggers release.yaml to build binaries + release.
+          git push origin "${{ steps.version.outputs.new_tag }}"
+
+      - name: Update CHANGELOG.md (best-effort, non-fatal)
+        continue-on-error: true
+        run: |
+          make changelog VERSION=${{ steps.version.outputs.new_version }}
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git diff --cached --quiet && { echo "No changelog changes"; exit 0; }
+          git commit -m "chore: changelog for ${{ steps.version.outputs.new_tag }}"
+
+          # Non-fatal: if branch protection blocks the push, the tag + release
+          # already happened above. The changelog just won't land this round.
+          if git push origin HEAD:main; then
+            echo "✅ CHANGELOG.md committed to main"
+          else
+            echo "⚠️  Could not push CHANGELOG.md to main (branch protection?) — tag + release unaffected"
+          fi

@@ -2,7 +2,7 @@
 # E2E Observability Agent — VM installer
 # Usage:
 #   E2E_API_KEY=<key> E2E_PROJECT_ID=<id> E2E_CUSTOMER_ID=<id> \
-#     bash -c "$(curl -fsSL https://raw.githubusercontent.com/e2enetworks-oss/otel-collector/main/install.sh)"
+#     bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 
 set -euo pipefail
 
@@ -14,112 +14,128 @@ DATA_DIR="/var/lib/e2e-otel-collector"
 SERVICE_NAME="e2e-otel-collector"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-CDN_BASE="https://observability.objectstore.e2enetworks.net/collector"
+# Published install assets (install.sh, samples/, mirrored release binaries) are
+# served from GitHub Pages — see .github/workflows/pages.yaml.
+PAGES_BASE="https://e2enetworks-oss.github.io/otel-collector"
 REGISTER_API="https://obs.e2enetworks.net/v1/install/register"
-FALLBACK_BINARY_VERSION="0.152.1"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 info()  { echo "[e2e-install] $*"; }
 error() { echo "[e2e-install] ERROR: $*" >&2; exit 1; }
 
-# ── Phase 0: Preflight ───────────────────────────────────────────────────────
-info "Running preflight checks..."
+# ── Pure functions (unit-testable via bats) ──────────────────────────────────
 
-[ "$(id -u)" -eq 0 ] || error "This script must be run as root (use sudo or run as root)."
-command -v curl     >/dev/null 2>&1 || error "curl is required but not installed."
-command -v systemctl >/dev/null 2>&1 || error "systemctl not found — this installer requires a systemd-based OS."
+# preflight: verify root, required tools, and required env vars.
+preflight() {
+  [ "$(id -u)" -eq 0 ] || error "This script must be run as root (use sudo or run as root)."
+  command -v curl      >/dev/null 2>&1 || error "curl is required but not installed."
+  command -v systemctl >/dev/null 2>&1 || error "systemctl not found — this installer requires a systemd-based OS."
 
-[ -n "${E2E_API_KEY:-}"     ] || error "E2E_API_KEY is not set."
-[ -n "${E2E_PROJECT_ID:-}"  ] || error "E2E_PROJECT_ID is not set."
-[ -n "${E2E_CUSTOMER_ID:-}" ] || error "E2E_CUSTOMER_ID is not set."
+  [ -n "${E2E_API_KEY:-}"     ] || error "E2E_API_KEY is not set."
+  [ -n "${E2E_PROJECT_ID:-}"  ] || error "E2E_PROJECT_ID is not set."
+  [ -n "${E2E_CUSTOMER_ID:-}" ] || error "E2E_CUSTOMER_ID is not set."
+}
 
-info "Preflight passed."
+# detect_arch: map `uname -m` to the Go arch string. Echoes amd64|arm64, or
+# exits with an error on unsupported platforms.
+detect_arch() {
+  local machine
+  machine=$(uname -m)
+  case "$machine" in
+    x86_64)  echo "amd64" ;;
+    aarch64) echo "arm64" ;;
+    *) error "Unsupported architecture: $machine. Only x86_64 and aarch64 are supported." ;;
+  esac
+}
 
-# ── Phase 1: Detect Platform ─────────────────────────────────────────────────
-info "Detecting platform..."
+# parse_field <json> <field>: extract a top-level string field from a JSON
+# object. Uses jq when available, falls back to grep/cut otherwise. Echoes the
+# value or an empty string when the field is absent.
+parse_field() {
+  local json="$1" field="$2"
+  if command -v jq >/dev/null 2>&1; then
+    echo "$json" | jq -r ".${field} // empty"
+  else
+    # `|| true` so a missing field (grep no-match → exit 1) doesn't trip
+    # pipefail/set -e in the caller before the friendly error check runs.
+    echo "$json" | grep -o "\"${field}\":\"[^\"]*\"" | cut -d'"' -f4 || true
+  fi
+}
 
-ARCH=$(uname -m)
-case "$ARCH" in
-  x86_64)  ARCH="amd64" ;;
-  aarch64) ARCH="arm64" ;;
-  *) error "Unsupported architecture: $ARCH. Only x86_64 and aarch64 are supported." ;;
-esac
+# ── Main install flow ─────────────────────────────────────────────────────────
+main() {
+  # Phase 0: Preflight
+  info "Running preflight checks..."
+  preflight
+  info "Preflight passed."
 
-OS_ID=""
-# shellcheck source=/dev/null
-[ -f /etc/os-release ] && OS_ID=$(. /etc/os-release && echo "${ID:-unknown}")
-info "Platform: linux/${ARCH} (${OS_ID:-unknown distro})"
+  # Phase 1: Detect platform
+  info "Detecting platform..."
+  ARCH=$(detect_arch)
+  OS_ID=""
+  # shellcheck source=/dev/null
+  [ -f /etc/os-release ] && OS_ID=$(. /etc/os-release && echo "${ID:-unknown}")
+  info "Platform: linux/${ARCH} (${OS_ID:-unknown distro})"
 
-# ── Phase 2: Register with E2E Observability API ─────────────────────────────
-info "Registering with E2E Observability API..."
+  # Phase 2: Register with E2E Observability API
+  info "Registering with E2E Observability API..."
+  REGISTER_RESPONSE=$(curl -fsSL -X POST "${REGISTER_API}" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"api_key\":      \"${E2E_API_KEY}\",
+      \"project_id\":   ${E2E_PROJECT_ID},
+      \"customer_id\":  ${E2E_CUSTOMER_ID},
+      \"resource_type\": \"vm\"
+    }") || error "Registration API call failed. Check your E2E_API_KEY and network connectivity."
 
-REGISTER_RESPONSE=$(curl -fsSL -X POST "${REGISTER_API}" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"api_key\":      \"${E2E_API_KEY}\",
-    \"project_id\":   ${E2E_PROJECT_ID},
-    \"customer_id\":  ${E2E_CUSTOMER_ID},
-    \"resource_type\": \"vm\"
-  }") || error "Registration API call failed. Check your E2E_API_KEY and network connectivity."
+  E2E_TOKEN=$(parse_field "${REGISTER_RESPONSE}" "ingestion_token")
+  E2E_LOG_GROUP=$(parse_field "${REGISTER_RESPONSE}" "log_group")
 
-E2E_TOKEN=$(echo "${REGISTER_RESPONSE}"   | grep -o '"ingestion_token":"[^"]*"' | cut -d'"' -f4)
-E2E_LOG_GROUP=$(echo "${REGISTER_RESPONSE}" | grep -o '"log_group":"[^"]*"'       | cut -d'"' -f4)
+  [ -n "${E2E_TOKEN:-}"     ] || error "Registration failed: ingestion_token missing. Check your credentials."
+  [ -n "${E2E_LOG_GROUP:-}" ] || error "Registration failed: log_group missing. Check your credentials."
 
-[ -n "${E2E_TOKEN:-}"     ] || error "Registration succeeded but ingestion_token was empty. Response: ${REGISTER_RESPONSE}"
-[ -n "${E2E_LOG_GROUP:-}" ] || error "Registration succeeded but log_group was empty. Response: ${REGISTER_RESPONSE}"
+  info "Registered. Log group: ${E2E_LOG_GROUP}"
 
-info "Registered. Log group: ${E2E_LOG_GROUP}"
+  # Phase 3: Download binary
+  info "Downloading E2E OTel Collector binary (linux/${ARCH})..."
+  local binary_url="${PAGES_BASE}/e2e-otel-collector-linux-${ARCH}"
+  local binary_tmp="${BINARY_PATH}.tmp"
 
-# ── Phase 3: Download Binary ──────────────────────────────────────────────────
-info "Downloading OTel Collector binary (linux/${ARCH})..."
+  mkdir -p "$(dirname "${BINARY_PATH}")"
 
-BINARY_URL="${CDN_BASE}/e2e-otel-collector-linux-${ARCH}"
-BINARY_TMP="${BINARY_PATH}.tmp"
+  curl -fsSL --progress-bar -o "${binary_tmp}" "${binary_url}" || \
+    error "Binary download failed from ${binary_url}. Please try again or contact E2E support."
 
-mkdir -p "$(dirname "${BINARY_PATH}")"
+  chmod +x "${binary_tmp}"
+  mv "${binary_tmp}" "${BINARY_PATH}"
+  info "Binary installed at ${BINARY_PATH}"
 
-if ! curl -fsSL --progress-bar -o "${BINARY_TMP}" "${BINARY_URL}"; then
-  info "CDN download failed, falling back to upstream otelcol-contrib v${FALLBACK_BINARY_VERSION}..."
-  FALLBACK_URL="https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${FALLBACK_BINARY_VERSION}/otelcol-contrib_${FALLBACK_BINARY_VERSION}_linux_${ARCH}.tar.gz"
-  FALLBACK_TMP=$(mktemp -d)
-  curl -fsSL --progress-bar -o "${FALLBACK_TMP}/otelcol.tar.gz" "${FALLBACK_URL}" || \
-    error "Both CDN and upstream fallback download failed."
-  tar -xzf "${FALLBACK_TMP}/otelcol.tar.gz" -C "${FALLBACK_TMP}"
-  cp "${FALLBACK_TMP}/otelcol-contrib" "${BINARY_TMP}"
-  rm -rf "${FALLBACK_TMP}"
-fi
+  # Phase 4: Write config, env file, and service
+  mkdir -p "${CONFIG_DIR}" "${DATA_DIR}/tmp"
+  chmod 755 "${CONFIG_DIR}"
+  chmod 700 "${DATA_DIR}"
 
-chmod +x "${BINARY_TMP}"
-mv "${BINARY_TMP}" "${BINARY_PATH}"
-info "Binary installed at ${BINARY_PATH}"
-
-# ── Phase 4: Write Config, Env File, and Service ─────────────────────────────
-
-# Create directories
-mkdir -p "${CONFIG_DIR}" "${DATA_DIR}/tmp"
-chmod 755 "${CONFIG_DIR}"
-chmod 700 "${DATA_DIR}"
-
-# 4a. Env file (mode 600 — credentials)
-HOST_NAME=$(hostname -f 2>/dev/null || hostname)
-info "Writing env file to ${CONFIG_DIR}/env..."
-cat > "${CONFIG_DIR}/env" <<EOF
+  # 4a. Env file (mode 600 — credentials)
+  local host_name
+  host_name=$(hostname -f 2>/dev/null || hostname)
+  info "Writing env file to ${CONFIG_DIR}/env..."
+  cat > "${CONFIG_DIR}/env" <<EOF
 E2E_TOKEN=${E2E_TOKEN}
-HOST_NAME=${HOST_NAME}
+HOST_NAME=${host_name}
 E2E_LOG_GROUP=${E2E_LOG_GROUP}
 E2E_PROJECT_ID=${E2E_PROJECT_ID}
 EOF
-chmod 600 "${CONFIG_DIR}/env"
+  chmod 600 "${CONFIG_DIR}/env"
 
-# 4b. Collector config (fetched from CDN)
-info "Fetching collector config..."
-curl -fsSL -o "${CONFIG_DIR}/config.yaml" "${CDN_BASE}/vm-config.yaml" || \
-  error "Failed to download vm-config.yaml from CDN."
-chmod 644 "${CONFIG_DIR}/config.yaml"
+  # 4b. Collector config (fetched from GitHub Pages)
+  info "Fetching collector config..."
+  curl -fsSL -o "${CONFIG_DIR}/config.yaml" "${PAGES_BASE}/samples/vm-config.yaml" || \
+    error "Failed to download vm-config.yaml from ${PAGES_BASE}/samples/vm-config.yaml."
+  chmod 644 "${CONFIG_DIR}/config.yaml"
 
-# 4c. Systemd service unit
-info "Installing systemd service..."
-cat > "${SERVICE_FILE}" <<EOF
+  # 4c. Systemd service unit
+  info "Installing systemd service..."
+  cat > "${SERVICE_FILE}" <<EOF
 [Unit]
 Description=E2E Observability Agent
 Documentation=https://github.com/e2enetworks-oss/otel-collector
@@ -143,29 +159,35 @@ SyslogIdentifier=${SERVICE_NAME}
 WantedBy=multi-user.target
 EOF
 
-# ── Start Service ─────────────────────────────────────────────────────────────
-info "Enabling and starting ${SERVICE_NAME}..."
-systemctl daemon-reload
-systemctl enable "${SERVICE_NAME}"
+  # Start service
+  info "Enabling and starting ${SERVICE_NAME}..."
+  systemctl daemon-reload
+  systemctl enable "${SERVICE_NAME}"
 
-if systemctl is-active --quiet "${SERVICE_NAME}"; then
-  systemctl restart "${SERVICE_NAME}"
-  info "Service restarted."
-else
-  systemctl start "${SERVICE_NAME}"
-  info "Service started."
+  if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    systemctl restart "${SERVICE_NAME}"
+    info "Service restarted."
+  else
+    systemctl start "${SERVICE_NAME}"
+    info "Service started."
+  fi
+
+  # Done
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo " E2E Observability Agent installed successfully!"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo " Host:      ${host_name}"
+  echo " Log group: ${E2E_LOG_GROUP}"
+  echo " Project:   ${E2E_PROJECT_ID}"
+  echo ""
+  echo " Status:    systemctl status ${SERVICE_NAME}"
+  echo " Logs:      journalctl -u ${SERVICE_NAME} -f"
+  echo " Health:    curl -s http://localhost:13133"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+# Run main only when executed directly — not when sourced by tests (bats).
+if [ "${BASH_SOURCE[0]:-$0}" = "${0}" ]; then
+  main "$@"
 fi
-
-# ── Done ──────────────────────────────────────────────────────────────────────
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " E2E Observability Agent installed successfully!"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " Host:      ${HOST_NAME}"
-echo " Log group: ${E2E_LOG_GROUP}"
-echo " Project:   ${E2E_PROJECT_ID}"
-echo ""
-echo " Status:    systemctl status ${SERVICE_NAME}"
-echo " Logs:      journalctl -u ${SERVICE_NAME} -f"
-echo " Health:    curl -s http://localhost:13133"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
