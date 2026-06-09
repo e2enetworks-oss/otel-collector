@@ -1,38 +1,64 @@
-name: Auto Tag on Merge
+name: Auto Tag & Changelog on Merge
 
 on:
   push:
     branches: [main]
+    # The job pushes a CHANGELOG.md commit back to main. paths-ignore stops
+    # that commit from re-triggering this workflow (no infinite loop), while
+    # still letting the tag push trigger release.yaml normally.
+    paths-ignore:
+      - 'CHANGELOG.md'
 
 permissions:
   contents: write
 
 jobs:
   tag:
-    name: Create patch tag
+    name: Bump version, changelog, tag
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Bump patch version and push tag
+      - name: Compute next patch version
+        id: version
         run: |
-          # Get latest tag — default to v0.0.0 if none exists
           LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
           LATEST=${LATEST:-v0.0.0}
           echo "Latest tag: $LATEST"
 
-          # Split into major.minor.patch
           MAJOR=$(echo "$LATEST" | cut -d. -f1 | tr -d 'v')
           MINOR=$(echo "$LATEST" | cut -d. -f2)
           PATCH=$(echo "$LATEST" | cut -d. -f3)
-
-          # Increment patch
           NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
-          echo "New tag: $NEW_TAG"
 
+          echo "Next tag: $NEW_TAG"
+          echo "new_tag=$NEW_TAG"           >> "$GITHUB_OUTPUT"
+          echo "new_version=${NEW_TAG#v}"   >> "$GITHUB_OUTPUT"
+
+      - name: Update CHANGELOG.md
+        run: make changelog VERSION=${{ steps.version.outputs.new_version }}
+
+      - name: Commit changelog, create and push tag
+        run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$NEW_TAG"
-          git push origin "$NEW_TAG"
+
+          git add CHANGELOG.md
+          git commit -m "chore: changelog for ${{ steps.version.outputs.new_tag }}" || echo "no changelog changes"
+
+          # Try to push the changelog commit to main. If branch protection
+          # blocks direct pushes, this is non-fatal — we still tag + release.
+          # The tag is created on the current HEAD either way.
+          if git push origin HEAD:main; then
+            echo "✅ CHANGELOG.md committed to main"
+          else
+            echo "⚠️  Could not push CHANGELOG.md to main (branch protection?) — tagging anyway"
+            # Tag the pre-changelog commit so the tag still points to real history on main.
+            git reset --hard HEAD~1 2>/dev/null || true
+          fi
+
+          git tag "${{ steps.version.outputs.new_tag }}"
+          # Push the tag → triggers release.yaml to build binaries + release
+          git push origin "${{ steps.version.outputs.new_tag }}"

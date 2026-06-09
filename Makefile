@@ -22,7 +22,7 @@ GO_MODULE_DIRS := $(shell find . -name go.mod -not -path '*/vendor/*' -not -path
 
 .DEFAULT_GOAL := help
 
-.PHONY: help lint lint-shell lint-go fmt fmtcheck vet install-golangci-lint
+.PHONY: help lint lint-shell lint-go test fmt fmtcheck vet install-golangci-lint changelog
 
 help: ## Show all available targets
 	@echo "E2E OTel Collector — available targets:"
@@ -40,6 +40,13 @@ lint-shell: ## Lint shell scripts with shellcheck
 	@echo "==> shellcheck $(SHELL_FILES)"
 	@shellcheck $(SHELL_FILES)
 	@echo "✅ shellcheck clean"
+
+# ── Test ───────────────────────────────────────────────────────────────────
+test: ## Run bats unit tests for install.sh
+	@command -v bats >/dev/null 2>&1 || { echo "❌ bats not installed — 'brew install bats-core' or 'apt install bats'"; exit 1; }
+	@echo "==> bats tests/"
+	@bats tests/
+	@echo "✅ bats tests passed"
 
 # ── Go ───────────────────────────────────────────────────────────────────────
 lint-go: ## Lint Go modules (fmt check + vet + golangci-lint); no-op until Go source lands
@@ -76,3 +83,24 @@ vet: ## Run go vet on all modules
 
 install-golangci-lint: ## Install the pinned golangci-lint
 	@go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
+
+# ── Changelog ────────────────────────────────────────────────────────────────
+changelog: ## Add a CHANGELOG.md entry from git commits — usage: make changelog VERSION=1.2.3
+	@if [ -z "$(VERSION)" ]; then echo "❌ VERSION is required. Usage: make changelog VERSION=1.2.3"; exit 1; fi
+	@touch CHANGELOG.md
+	@DATE=$$(date +%Y-%m-%d); \
+	LAST_TAG=$$(git describe --tags --abbrev=0 2>/dev/null || echo ""); \
+	if [ -n "$$LAST_TAG" ]; then \
+		COMMITS=$$(git log $$LAST_TAG..HEAD --pretty=format:"- %s" --no-merges 2>/dev/null | grep -v "^- Merge" | head -30); \
+	else \
+		COMMITS=$$(git log -20 --pretty=format:"- %s" --no-merges 2>/dev/null); \
+	fi; \
+	[ -z "$$COMMITS" ] && COMMITS="- Version bump"; \
+	{ \
+		echo "## [$(VERSION)] - $$DATE"; \
+		echo ""; \
+		echo "$$COMMITS"; \
+		echo ""; \
+		cat CHANGELOG.md; \
+	} > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md; \
+	echo "✅ CHANGELOG.md updated for v$(VERSION) — review with 'git diff CHANGELOG.md'"
