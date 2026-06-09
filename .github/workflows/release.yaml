@@ -101,11 +101,10 @@ jobs:
       - name: Generate SHA256 checksums
         working-directory: artifacts
         run: |
-          sha256sum \
-            e2e-otel-collector-linux-amd64 \
-            e2e-otel-collector-linux-arm64 \
-            e2e-otel-collector-windows-amd64.exe \
-            > checksums.txt
+          # Glob over the downloaded artifacts so the list self-maintains when the
+          # build matrix changes. sha256sum exits non-zero if nothing matches, so a
+          # broken artifact download still fails the job loudly.
+          sha256sum e2e-otel-collector-* > checksums.txt
           echo "── checksums.txt ──"
           cat checksums.txt
 
