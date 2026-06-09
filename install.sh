@@ -2,7 +2,7 @@
 # E2E Observability Agent — VM installer
 # Usage:
 #   E2E_API_KEY=<key> E2E_PROJECT_ID=<id> E2E_CUSTOMER_ID=<id> \
-#     bash -c "$(curl -fsSL https://raw.githubusercontent.com/e2enetworks-oss/otel-collector/main/install.sh)"
+#     bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 
 set -euo pipefail
 
@@ -14,7 +14,9 @@ DATA_DIR="/var/lib/e2e-otel-collector"
 SERVICE_NAME="e2e-otel-collector"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-CDN_BASE="https://observability.objectstore.e2enetworks.net/collector"
+# Published install assets (install.sh, samples/, mirrored release binaries) are
+# served from GitHub Pages — see .github/workflows/pages.yaml.
+PAGES_BASE="https://e2enetworks-oss.github.io/otel-collector"
 REGISTER_API="https://obs.e2enetworks.net/v1/install/register"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -96,7 +98,7 @@ main() {
 
   # Phase 3: Download binary
   info "Downloading E2E OTel Collector binary (linux/${ARCH})..."
-  local binary_url="${CDN_BASE}/e2e-otel-collector-linux-${ARCH}"
+  local binary_url="${PAGES_BASE}/e2e-otel-collector-linux-${ARCH}"
   local binary_tmp="${BINARY_PATH}.tmp"
 
   mkdir -p "$(dirname "${BINARY_PATH}")"
@@ -125,10 +127,10 @@ E2E_PROJECT_ID=${E2E_PROJECT_ID}
 EOF
   chmod 600 "${CONFIG_DIR}/env"
 
-  # 4b. Collector config (fetched from CDN)
+  # 4b. Collector config (fetched from GitHub Pages)
   info "Fetching collector config..."
-  curl -fsSL -o "${CONFIG_DIR}/config.yaml" "${CDN_BASE}/vm-config.yaml" || \
-    error "Failed to download vm-config.yaml from CDN."
+  curl -fsSL -o "${CONFIG_DIR}/config.yaml" "${PAGES_BASE}/samples/vm-config.yaml" || \
+    error "Failed to download vm-config.yaml from ${PAGES_BASE}/samples/vm-config.yaml."
   chmod 644 "${CONFIG_DIR}/config.yaml"
 
   # 4c. Systemd service unit

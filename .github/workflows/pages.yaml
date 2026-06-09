@@ -1,0 +1,82 @@
+name: Publish install assets to GitHub Pages
+
+# Serves the curated install surface at
+# https://e2enetworks-oss.github.io/otel-collector/ :
+#   - install.sh                       (the VM installer)
+#   - samples/vm-config.yaml           (reference collector config)
+#   - e2e-otel-collector-linux-amd64   ─┐ mirrored from the latest GitHub
+#   - e2e-otel-collector-linux-arm64    │ Release (Releases stays the origin;
+#   - e2e-otel-collector-windows-amd64.exe ┘ Pages is just a mirror)
+#   - checksums.txt
+#
+# Nothing else from the repo is published — this is a built artifact, not a
+# "deploy from branch" of the whole tree.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'install.sh'
+      - 'samples/**'
+      - '.github/workflows/pages.yaml'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deploy at a time; never cancel an in-progress deploy mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Assemble Pages site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Assemble publish directory (install.sh + samples)
+        run: |
+          mkdir -p public/samples
+          cp install.sh             public/install.sh
+          cp samples/vm-config.yaml public/samples/vm-config.yaml
+
+      - name: Mirror latest release binaries (best-effort)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Pull binaries + checksums from the most recent release into the Pages
+          # site. Non-fatal: on a fresh repo with no releases yet, install.sh and
+          # samples still publish so the site is never empty.
+          if gh release download --repo "${{ github.repository }}" \
+               --pattern 'e2e-otel-collector-*' \
+               --pattern 'checksums.txt' \
+               --dir public; then
+            echo "✅ Mirrored release binaries"
+          else
+            echo "⚠️  No release assets to mirror yet — publishing install.sh + samples only"
+          fi
+          echo "── Pages site contents ──"
+          find public -type f | sort
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
