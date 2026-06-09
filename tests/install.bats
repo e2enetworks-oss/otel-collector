@@ -12,11 +12,14 @@ setup() {
   STUB_DIR="$(mktemp -d)"
   PATH="${STUB_DIR}:${PATH}"
 
-  # set -e inside install.sh would abort sourcing; disable it for the source.
+  # install.sh runs `set -euo pipefail` at top level. Disable errexit for the
+  # source (otherwise the first non-zero command aborts it), then clear all three
+  # afterward — nounset/pipefail would otherwise leak into every test and make a
+  # future bare-$VAR reference fail confusingly. Tests own error handling via `run`.
   set +e
   # shellcheck source=/dev/null
   source "${REPO_ROOT}/install.sh"
-  set -e
+  set +euo pipefail
 }
 
 teardown() {
@@ -65,13 +68,8 @@ EOF
 # ── parse_field (grep/cut path — hide jq from PATH) ──────────────────────────
 
 @test "parse_field extracts ingestion_token without jq" {
-  stub jq <<'EOF'
-#!/usr/bin/env bash
-exit 127
-EOF
-  # command -v must not find jq: point it at a non-executable name instead.
-  rm -f "${STUB_DIR}/jq"
-  # Ensure no real jq interferes by shadowing command lookup via a wrapper.
+  # parse_field probes for jq via `command -v jq`; shadowing the `command`
+  # builtin with a function that reports jq absent forces the grep/cut path.
   run bash -c '
     source "'"${REPO_ROOT}"'/install.sh"
     command() { if [ "$2" = "jq" ]; then return 1; fi; builtin command "$@"; }
