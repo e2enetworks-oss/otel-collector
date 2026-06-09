@@ -89,9 +89,9 @@ changelog: ## Add a CHANGELOG.md entry from git commits — usage: make changelo
 	@if [ -z "$(VERSION)" ]; then echo "❌ VERSION is required. Usage: make changelog VERSION=1.2.3"; exit 1; fi
 	@touch CHANGELOG.md
 	@DATE=$$(date +%Y-%m-%d); \
-	LAST_TAG=$$(git describe --tags --abbrev=0 2>/dev/null || echo ""); \
-	if [ -n "$$LAST_TAG" ]; then \
-		COMMITS=$$(git log $$LAST_TAG..HEAD --pretty=format:"- %s" --no-merges 2>/dev/null | grep -v "^- Merge" | head -30); \
+	PREV_TAG=$$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | grep -Fvx "v$(VERSION)" | head -1); \
+	if [ -n "$$PREV_TAG" ]; then \
+		COMMITS=$$(git log $$PREV_TAG..HEAD --pretty=format:"- %s" --no-merges 2>/dev/null | grep -v "^- Merge" | head -30); \
 	else \
 		COMMITS=$$(git log -20 --pretty=format:"- %s" --no-merges 2>/dev/null); \
 	fi; \
