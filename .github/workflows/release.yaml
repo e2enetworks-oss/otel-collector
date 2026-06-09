@@ -71,14 +71,15 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
+          mkdir -p "${{ github.workspace }}/dist"
           go build -trimpath \
-            -o "${{ github.workspace }}/releases/latest/${{ matrix.binary_name }}" \
+            -o "${{ github.workspace }}/dist/${{ matrix.binary_name }}" \
             .
 
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.binary_name }}
-          path: releases/latest/${{ matrix.binary_name }}
+          path: dist/${{ matrix.binary_name }}
           if-no-files-found: error
 
   # ── Create a GitHub Release when a v* tag is pushed ────────────────────────
@@ -105,4 +106,3 @@ jobs:
             artifacts/e2e-otel-collector-linux-amd64
             artifacts/e2e-otel-collector-linux-arm64
             artifacts/e2e-otel-collector-windows-amd64.exe
-            releases/latest/vm-config.yaml

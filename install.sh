@@ -16,7 +16,6 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 CDN_BASE="https://observability.objectstore.e2enetworks.net/collector"
 REGISTER_API="https://obs.e2enetworks.net/v1/install/register"
-FALLBACK_BINARY_VERSION="0.152.1"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 info()  { echo "[e2e-install] $*"; }
@@ -26,7 +25,7 @@ error() { echo "[e2e-install] ERROR: $*" >&2; exit 1; }
 info "Running preflight checks..."
 
 [ "$(id -u)" -eq 0 ] || error "This script must be run as root (use sudo or run as root)."
-command -v curl     >/dev/null 2>&1 || error "curl is required but not installed."
+command -v curl      >/dev/null 2>&1 || error "curl is required but not installed."
 command -v systemctl >/dev/null 2>&1 || error "systemctl not found — this installer requires a systemd-based OS."
 
 [ -n "${E2E_API_KEY:-}"     ] || error "E2E_API_KEY is not set."
@@ -62,32 +61,30 @@ REGISTER_RESPONSE=$(curl -fsSL -X POST "${REGISTER_API}" \
     \"resource_type\": \"vm\"
   }") || error "Registration API call failed. Check your E2E_API_KEY and network connectivity."
 
-E2E_TOKEN=$(echo "${REGISTER_RESPONSE}"   | grep -o '"ingestion_token":"[^"]*"' | cut -d'"' -f4)
-E2E_LOG_GROUP=$(echo "${REGISTER_RESPONSE}" | grep -o '"log_group":"[^"]*"'       | cut -d'"' -f4)
+# Parse response — use jq if available, fall back to grep/cut
+if command -v jq >/dev/null 2>&1; then
+  E2E_TOKEN=$(echo "${REGISTER_RESPONSE}"    | jq -r '.ingestion_token // empty')
+  E2E_LOG_GROUP=$(echo "${REGISTER_RESPONSE}" | jq -r '.log_group // empty')
+else
+  E2E_TOKEN=$(echo "${REGISTER_RESPONSE}"    | grep -o '"ingestion_token":"[^"]*"' | cut -d'"' -f4)
+  E2E_LOG_GROUP=$(echo "${REGISTER_RESPONSE}" | grep -o '"log_group":"[^"]*"'       | cut -d'"' -f4)
+fi
 
-[ -n "${E2E_TOKEN:-}"     ] || error "Registration succeeded but ingestion_token was empty. Response: ${REGISTER_RESPONSE}"
-[ -n "${E2E_LOG_GROUP:-}" ] || error "Registration succeeded but log_group was empty. Response: ${REGISTER_RESPONSE}"
+[ -n "${E2E_TOKEN:-}"     ] || error "Registration failed: ingestion_token missing. Check your credentials."
+[ -n "${E2E_LOG_GROUP:-}" ] || error "Registration failed: log_group missing. Check your credentials."
 
 info "Registered. Log group: ${E2E_LOG_GROUP}"
 
 # ── Phase 3: Download Binary ──────────────────────────────────────────────────
-info "Downloading OTel Collector binary (linux/${ARCH})..."
+info "Downloading E2E OTel Collector binary (linux/${ARCH})..."
 
 BINARY_URL="${CDN_BASE}/e2e-otel-collector-linux-${ARCH}"
 BINARY_TMP="${BINARY_PATH}.tmp"
 
 mkdir -p "$(dirname "${BINARY_PATH}")"
 
-if ! curl -fsSL --progress-bar -o "${BINARY_TMP}" "${BINARY_URL}"; then
-  info "CDN download failed, falling back to upstream otelcol-contrib v${FALLBACK_BINARY_VERSION}..."
-  FALLBACK_URL="https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${FALLBACK_BINARY_VERSION}/otelcol-contrib_${FALLBACK_BINARY_VERSION}_linux_${ARCH}.tar.gz"
-  FALLBACK_TMP=$(mktemp -d)
-  curl -fsSL --progress-bar -o "${FALLBACK_TMP}/otelcol.tar.gz" "${FALLBACK_URL}" || \
-    error "Both CDN and upstream fallback download failed."
-  tar -xzf "${FALLBACK_TMP}/otelcol.tar.gz" -C "${FALLBACK_TMP}"
-  cp "${FALLBACK_TMP}/otelcol-contrib" "${BINARY_TMP}"
-  rm -rf "${FALLBACK_TMP}"
-fi
+curl -fsSL --progress-bar -o "${BINARY_TMP}" "${BINARY_URL}" || \
+  error "Binary download failed from ${BINARY_URL}. Please try again or contact E2E support."
 
 chmod +x "${BINARY_TMP}"
 mv "${BINARY_TMP}" "${BINARY_PATH}"
