@@ -1,4 +1,4 @@
-## [0.0.1] - 2026-06-09
+## [0.148.0] - 2026-06-16
 
 - feat(install): serve install.sh, samples, and binaries from GitHub Pages
 - fix(changelog): derive commit range from the previous tag, not the new one
