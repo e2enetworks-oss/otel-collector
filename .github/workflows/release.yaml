@@ -172,3 +172,61 @@ jobs:
             artifacts/e2e-otel-collector-linux-arm64
             artifacts/e2e-otel-collector-windows-amd64.exe
             artifacts/checksums.txt
+
+  # ── Mirror install assets + binaries to GitHub Pages ───────────────────────
+  # Runs in the SAME workflow run as `release`, chained off the build artifacts —
+  # not off a `release: published` event. softprops/action-gh-release creates the
+  # Release with GITHUB_TOKEN, and GitHub never triggers a separate workflow from
+  # a GITHUB_TOKEN-authored event, so pages.yaml's `release:` trigger was dead.
+  # Pulling the artifacts produced earlier in this run guarantees the Pages mirror
+  # and the Release ship the exact same bytes, with no cross-workflow hop.
+  mirror-pages:
+    name: Mirror to GitHub Pages
+    needs: [release, build]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    # One Pages deploy at a time; never cancel an in-progress deploy mid-publish.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download build artifacts (this run)
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Assemble Pages site (install.sh + samples + binaries + checksums)
+        run: |
+          mkdir -p public/samples
+          cp install.sh             public/install.sh
+          cp samples/vm-config.yaml public/samples/vm-config.yaml
+
+          # Binaries come straight from this run's build artifacts — same bytes as
+          # the Release. Regenerate checksums.txt here so the mirror is self-consistent
+          # even if the set of binaries changes with the build matrix.
+          cp artifacts/e2e-otel-collector-* public/
+          ( cd public && sha256sum e2e-otel-collector-* > checksums.txt )
+
+          echo "── Pages site contents ──"
+          find public -type f | sort
+          echo "── checksums.txt ──"
+          cat public/checksums.txt
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
