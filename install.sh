@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # E2E Observability Agent — VM installer
 # Usage:
-#   E2E_API_KEY=<key> E2E_PROJECT_ID=<id> E2E_CUSTOMER_ID=<id> \
+#   E2E_API_KEY=<key> \
 #     bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 
 set -euo pipefail
@@ -31,9 +31,7 @@ preflight() {
   command -v curl      >/dev/null 2>&1 || error "curl is required but not installed."
   command -v systemctl >/dev/null 2>&1 || error "systemctl not found — this installer requires a systemd-based OS."
 
-  [ -n "${E2E_API_KEY:-}"     ] || error "E2E_API_KEY is not set."
-  [ -n "${E2E_PROJECT_ID:-}"  ] || error "E2E_PROJECT_ID is not set."
-  [ -n "${E2E_CUSTOMER_ID:-}" ] || error "E2E_CUSTOMER_ID is not set."
+  [ -n "${E2E_API_KEY:-}" ] || error "E2E_API_KEY is not set."
 }
 
 # detect_arch: map `uname -m` to the Go arch string. Echoes amd64|arm64, or
@@ -82,17 +80,17 @@ main() {
   REGISTER_RESPONSE=$(curl -fsSL -X POST "${REGISTER_API}" \
     -H "Content-Type: application/json" \
     -d "{
-      \"api_key\":      \"${E2E_API_KEY}\",
-      \"project_id\":   ${E2E_PROJECT_ID},
-      \"customer_id\":  ${E2E_CUSTOMER_ID},
+      \"api_key\":       \"${E2E_API_KEY}\",
       \"resource_type\": \"vm\"
     }") || error "Registration API call failed. Check your E2E_API_KEY and network connectivity."
 
   E2E_TOKEN=$(parse_field "${REGISTER_RESPONSE}" "ingestion_token")
   E2E_LOG_GROUP=$(parse_field "${REGISTER_RESPONSE}" "log_group")
+  E2E_PROJECT_ID=$(parse_field "${REGISTER_RESPONSE}" "project_id")
 
   [ -n "${E2E_TOKEN:-}"     ] || error "Registration failed: ingestion_token missing. Check your credentials."
   [ -n "${E2E_LOG_GROUP:-}" ] || error "Registration failed: log_group missing. Check your credentials."
+  [ -n "${E2E_PROJECT_ID:-}" ] || error "Registration failed: project_id missing. Check your credentials."
 
   info "Registered. Log group: ${E2E_LOG_GROUP}"
 
