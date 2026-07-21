@@ -111,13 +111,12 @@ EOF
 exit 0
 EOF
   unset E2E_API_KEY
-  export E2E_PROJECT_ID=1016 E2E_CUSTOMER_ID=1981
   run preflight
   [ "$status" -ne 0 ]
   [[ "$output" == *"E2E_API_KEY is not set"* ]]
 }
 
-@test "preflight passes with root, tools, and all env vars" {
+@test "preflight passes with root, tools, and E2E_API_KEY" {
   stub id <<'EOF'
 #!/usr/bin/env bash
 echo "0"
@@ -126,7 +125,7 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  export E2E_API_KEY=key E2E_PROJECT_ID=1016 E2E_CUSTOMER_ID=1981
+  export E2E_API_KEY=key
   run preflight
   [ "$status" -eq 0 ]
 }

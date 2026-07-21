@@ -130,16 +130,14 @@ Install the E2E Observability Agent on your Linux VM to start collecting logs an
 
 ```bash
 E2E_API_KEY=<your-api-key> \
-E2E_PROJECT_ID=<your-project-id> \
-E2E_CUSTOMER_ID=<your-customer-id> \
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/e2enetworks-oss/otel-collector/main/install.sh)"
 ```
 
 | Variable | Where to find it |
 |---|---|
 | `E2E_API_KEY` | MyAccount → API IAM |
-| `E2E_PROJECT_ID` | MyAccount → Projects |
-| `E2E_CUSTOMER_ID` | MyAccount → Profile |
+
+`project_id` and `customer_id` are no longer supplied by hand — the register call derives both deterministically from the API key server-side and returns `project_id` in the response, same as it already does for `log_group`.
 
 The install command is **idempotent** — safe to re-run on the same VM to update or repair the agent.
 
