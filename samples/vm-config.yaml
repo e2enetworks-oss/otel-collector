@@ -23,7 +23,10 @@ extensions:
 receivers:
   # ── Systemd journal ───────────────────────────────────────────────────────
   journald:
-    directory: /run/log/journal
+    # No explicit `directory:` — journalctl then reads the system default
+    # locations, covering both volatile (/run/log/journal) and persistent
+    # (/var/log/journal) storage. Pinning /run/log/journal silently collected
+    # nothing on persistent-journal distros (RHEL/AlmaLinux 9, most Ubuntu).
     priority: info
     operators:
       - type: copy

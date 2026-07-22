@@ -76,12 +76,20 @@ main() {
   info "Platform: linux/${ARCH} (${OS_ID:-unknown distro})"
 
   # Phase 2: Register with E2E Observability API
+  # hostname is sent so the server derives a per-host log group
+  # (logs.infra.vm.<project_id>.<host>). Sanitized to characters that are
+  # safe inside a JSON string; the server re-sanitizes for group naming.
+  local host_name
+  host_name=$(hostname -f 2>/dev/null || hostname)
+  host_name=${host_name//[^a-zA-Z0-9.-]/}
+
   info "Registering with E2E Observability API..."
   REGISTER_RESPONSE=$(curl -fsSL -X POST "${REGISTER_API}" \
     -H "Content-Type: application/json" \
     -d "{
       \"api_key\":       \"${E2E_API_KEY}\",
-      \"resource_type\": \"vm\"
+      \"resource_type\": \"vm\",
+      \"hostname\":      \"${host_name}\"
     }") || error "Registration API call failed. Check your E2E_API_KEY and network connectivity."
 
   E2E_TOKEN=$(parse_field "${REGISTER_RESPONSE}" "ingestion_token")
@@ -113,9 +121,8 @@ main() {
   chmod 755 "${CONFIG_DIR}"
   chmod 700 "${DATA_DIR}"
 
-  # 4a. Env file (mode 600 — credentials)
-  local host_name
-  host_name=$(hostname -f 2>/dev/null || hostname)
+  # 4a. Env file (mode 600 — credentials). host_name was computed and
+  # sanitized before registration so both use the same value.
   info "Writing env file to ${CONFIG_DIR}/env..."
   cat > "${CONFIG_DIR}/env" <<EOF
 E2E_TOKEN=${E2E_TOKEN}

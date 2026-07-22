@@ -130,7 +130,7 @@ Install the E2E Observability Agent on your Linux VM to start collecting logs an
 
 ```bash
 E2E_API_KEY=<your-api-key> \
-  bash -c "$(curl -fsSL https://raw.githubusercontent.com/e2enetworks-oss/otel-collector/main/install.sh)"
+  bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 ```
 
 | Variable | Where to find it |
@@ -145,7 +145,7 @@ What the installer actually does (see `install.sh`):
 
 1. **Preflight** — checks root, `curl`, `systemctl`, and required env vars.
 2. **Detect platform** — maps `uname -m` to `amd64`/`arm64`.
-3. **Register** — `POST`s to `https://obs.e2enetworks.net/v1/install/register` with the API key/project/customer IDs; gets back an `ingestion_token` and `log_group`.
+3. **Register** — `POST`s to `https://obs.e2enetworks.net/v1/install/register` with the API key and sanitized hostname; gets back an `ingestion_token`, `log_group`, and `project_id`. The hostname gives each VM its own log group (`logs.infra.vm.<project_id>.<host>`).
 4. **Download binary** — pulls `e2e-otel-collector-linux-<arch>` from GitHub Pages into `/usr/local/bin/e2e-otelcol`.
 5. **Write config** — env file (mode 600, credentials) at `/etc/e2e-otel-collector/env`, and `samples/vm-config.yaml` (via Pages) at `/etc/e2e-otel-collector/config.yaml`.
 6. **Install & start** the systemd unit, enabling it and (re)starting the service.
