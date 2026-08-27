@@ -11,6 +11,14 @@ name: Publish install assets to GitHub Pages
 #
 # Nothing else from the repo is published — this is a built artifact, not a
 # "deploy from branch" of the whole tree.
+#
+# Two publish paths:
+#   1. Release time → release.yaml's `mirror-pages` job mirrors the freshly built
+#      binaries in the SAME run (no `release: published` hop — GitHub won't trigger
+#      a workflow from a GITHUB_TOKEN-authored release event).
+#   2. install.sh / samples change on main → THIS workflow re-deploys the install
+#      assets and re-mirrors the current release binaries so a docs-only change
+#      never wipes the binaries off Pages.
 
 on:
   push:
@@ -19,8 +27,6 @@ on:
       - 'install.sh'
       - 'samples/**'
       - '.github/workflows/pages.yaml'
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:

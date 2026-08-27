@@ -2,17 +2,61 @@ name: Build E2E OTel Collector
 
 on:
   push:
-    branches: [main, otel-collector]
+    branches: [main]
     tags: ['v*']
   pull_request:
     branches: [main]
+  # Manual re-trigger of a release without re-pushing the tag.
+  # Tags are pushed by a human (see CONTRIBUTING / house style) — release.yaml
+  # only ever runs the `release` job for an existing v* tag.
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing git tag to (re)build and release, e.g. v0.148.0'
+        required: true
+        type: string
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # ── Tag / version contract ────────────────────────────────────────────────
+  # The release tag tracks the OTel Collector version this binary is built from
+  # (otelcol_version in collector/builder-config.yaml). A v0.148.0 tag must build
+  # the 0.148.0 collector. A trailing -e2e.N suffix is allowed so multiple E2E
+  # builds can ship on the same OTel base (v0.148.0-e2e.1). Runs on tag pushes
+  # and workflow_dispatch only — branch/PR builds skip it (no tag to verify).
+  verify-tag:
+    name: Verify tag matches OTel version
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Assert tag version == otelcol_version
+        run: |
+          REF_TAG="${{ github.event.inputs.release_tag }}"
+          REF_TAG="${REF_TAG:-${GITHUB_REF#refs/tags/}}"
+          TAG_VER="${REF_TAG#v}"
+          # Strip an optional -e2e.N build suffix before comparing.
+          BASE_VER="${TAG_VER%%-e2e.*}"
+
+          PIN=$(grep -E '^[[:space:]]*otelcol_version:' collector/builder-config.yaml \
+                | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+
+          echo "tag=$REF_TAG  tag_version=$BASE_VER  builder_pin=$PIN"
+          if [ "$BASE_VER" != "$PIN" ]; then
+            echo "::error::tag $REF_TAG (version $BASE_VER) does not match otelcol_version $PIN in collector/builder-config.yaml" >&2
+            exit 1
+          fi
+          echo "✓ tag $REF_TAG matches OTel version $PIN"
+
   build:
     name: ${{ matrix.binary_name }}
+    needs: verify-tag
+    # verify-tag is skipped on branch/PR builds; `always()` lets build still run
+    # there, while a real failure on a tag/dispatch run blocks the release.
+    if: always() && (needs.verify-tag.result == 'success' || needs.verify-tag.result == 'skipped')
     runs-on: ${{ matrix.runs_on }}
     strategy:
       fail-fast: false
@@ -82,16 +126,26 @@ jobs:
           path: dist/${{ matrix.binary_name }}
           if-no-files-found: error
 
-  # ── Create a GitHub Release when a v* tag is pushed ────────────────────────
+  # ── Create a GitHub Release when a v* tag is pushed (or dispatched) ─────────
   release:
     name: GitHub Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v5
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          # On a tag push the ref carries the tag; on workflow_dispatch the user
+          # supplied it. softprops/action-gh-release needs tag_name explicitly
+          # when the workflow ref is not the tag itself (dispatch case).
+          TAG="${{ github.event.inputs.release_tag }}"
+          TAG="${TAG:-${GITHUB_REF#refs/tags/}}"
+          echo "name=$TAG" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v5
         with:
@@ -111,9 +165,68 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.name }}
           generate_release_notes: true
           files: |
             artifacts/e2e-otel-collector-linux-amd64
             artifacts/e2e-otel-collector-linux-arm64
             artifacts/e2e-otel-collector-windows-amd64.exe
             artifacts/checksums.txt
+
+  # ── Mirror install assets + binaries to GitHub Pages ───────────────────────
+  # Runs in the SAME workflow run as `release`, chained off the build artifacts —
+  # not off a `release: published` event. softprops/action-gh-release creates the
+  # Release with GITHUB_TOKEN, and GitHub never triggers a separate workflow from
+  # a GITHUB_TOKEN-authored event, so pages.yaml's `release:` trigger was dead.
+  # Pulling the artifacts produced earlier in this run guarantees the Pages mirror
+  # and the Release ship the exact same bytes, with no cross-workflow hop.
+  mirror-pages:
+    name: Mirror to GitHub Pages
+    needs: [release, build]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    # One Pages deploy at a time; never cancel an in-progress deploy mid-publish.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download build artifacts (this run)
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Assemble Pages site (install.sh + samples + binaries + checksums)
+        run: |
+          mkdir -p public/samples
+          cp install.sh             public/install.sh
+          cp samples/vm-config.yaml public/samples/vm-config.yaml
+
+          # Binaries come straight from this run's build artifacts — same bytes as
+          # the Release. Regenerate checksums.txt here so the mirror is self-consistent
+          # even if the set of binaries changes with the build matrix.
+          cp artifacts/e2e-otel-collector-* public/
+          ( cd public && sha256sum e2e-otel-collector-* > checksums.txt )
+
+          echo "── Pages site contents ──"
+          find public -type f | sort
+          echo "── checksums.txt ──"
+          cat public/checksums.txt
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
