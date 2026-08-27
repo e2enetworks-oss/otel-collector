@@ -8,6 +8,9 @@
 #   E2E_TOKEN        — ingestion token from the register API
 #   E2E_LOG_GROUP    — log group name (e.g. logs.infra.vm.1016)
 #   E2E_PROJECT_ID   — E2E project ID
+#   E2E_GATEWAY_ENDPOINT
+#                    — otel-gateway OTLP/gRPC listener as host:port
+#                      (e.g. <gateway-host>:31318). No scheme, no path.
 # =============================================================================
 
 extensions:
@@ -23,19 +26,31 @@ extensions:
 receivers:
   # ── Systemd journal ───────────────────────────────────────────────────────
   journald:
-    directory: /run/log/journal
+    # No explicit `directory:` — journalctl then reads the system default
+    # locations, covering both volatile (/run/log/journal) and persistent
+    # (/var/log/journal) storage. Pinning /run/log/journal silently collected
+    # nothing on persistent-journal distros (RHEL/AlmaLinux 9, most Ubuntu).
     priority: info
     operators:
+      # Every field below is guarded with `if`. Journal entries are not uniform
+      # — kernel messages, run-parts, and audit entries legitimately lack
+      # SYSLOG_IDENTIFIER / _SYSTEMD_UNIT. Without the guard the operator errors
+      # and stanza DROPS the whole entry ("failed to write entry"), so an
+      # unguarded copy silently loses logs rather than just skipping a label.
       - type: copy
+        if: 'body["SYSLOG_IDENTIFIER"] != nil'
         from: body.SYSLOG_IDENTIFIER
         to: attributes["service.name"]
       - type: copy
+        if: 'body["PRIORITY"] != nil'
         from: body.PRIORITY
         to: attributes["syslog.priority"]
       - type: copy
+        if: 'body["_SYSTEMD_UNIT"] != nil'
         from: body._SYSTEMD_UNIT
         to: attributes["systemd.unit"]
       - type: move
+        if: 'body["MESSAGE"] != nil'
         from: body.MESSAGE
         to: body
       - type: add
@@ -126,7 +141,9 @@ processors:
 
 exporters:
   otlp/gateway:
-    endpoint: "172.16.230.168:31318"
+    # otel-gateway OTLP/gRPC listener, as host:port — no scheme, no path.
+    # Written to the env file by install.sh from E2E_GATEWAY_ENDPOINT.
+    endpoint: "${env:E2E_GATEWAY_ENDPOINT}"
     tls:
       insecure: true
     headers:

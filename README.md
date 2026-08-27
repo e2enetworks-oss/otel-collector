@@ -125,19 +125,63 @@ Install the E2E Observability Agent on your Linux VM to start collecting logs an
 - Running as **root**
 - `curl` installed
 - systemd-based OS (Ubuntu, AlmaLinux, RHEL, Debian, etc.)
+- Network reach to your observability deployment — the register API
+  (`E2E_REGISTER_API`) and the telemetry gateway (`E2E_GATEWAY_ENDPOINT`)
 
 ### Install
 
 ```bash
 E2E_API_KEY=<your-api-key> \
+E2E_REGISTER_API=http://<obs-api-host>:31881/v1/install/register \
+E2E_GATEWAY_ENDPOINT=<gateway-host>:31318 \
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/e2enetworks-oss/otel-collector/main/install.sh)"
 ```
 
-| Variable | Where to find it |
-|---|---|
-| `E2E_API_KEY` | MyAccount → API IAM |
+| Variable | What it is | Where to find it |
+|---|---|---|
+| `E2E_API_KEY` | Your account credential | MyAccount → API IAM |
+| `E2E_REGISTER_API` | `observability-api` register endpoint — the `rest` port of the `observability-api` Service (NodePort **31881** in the reference deployment). Full URL including `/v1/install/register`. | Ask your observability admin |
+| `E2E_GATEWAY_ENDPOINT` | `otel-gateway` OTLP/gRPC listener as `host:port` — no scheme, no path. Port 4317 on the Service (NodePort **31318** in the reference deployment). | Ask your observability admin |
 
-`project_id` and `customer_id` are no longer supplied by hand — the register call derives both deterministically from the API key server-side and returns `project_id` in the response, same as it already does for `log_group`.
+The two endpoints are deployment-specific and have **no defaults** — the
+installer's preflight fails with an explicit message if either is unset, rather
+than guessing at an address. `E2E_GATEWAY_ENDPOINT` is written into
+`/etc/e2e-otel-collector/env` and consumed by the collector config as
+`${env:E2E_GATEWAY_ENDPOINT}`.
+
+`E2E_API_KEY` is the only credential you supply. The register call derives the
+tenant from it server-side and returns `project_id` alongside `log_group`, so
+neither has to be passed by hand. The VM's hostname is sent automatically, which
+is what gives each host its own log group.
+
+#### Register API
+
+`POST <E2E_REGISTER_API>` — the `observability-api` REST service on the
+observability cluster, e.g. `http://<obs-api-host>:31881/v1/install/register`.
+
+Request:
+
+```json
+{
+  "apiKey":       "<your-api-key>",
+  "resourceType": "vm",
+  "hostname":     "web-01"
+}
+```
+
+Response:
+
+```json
+{
+  "ingestion_token": "sk_<project>_<id>",
+  "project_id":      "2dc3a652-3714-5bc4-930c-d8871c32ac94",
+  "log_group":       "logs.infra.vm.2dc3a652-3714-5bc4-930c-d8871c32ac94.web-01"
+}
+```
+
+Note the casing: request fields are **camelCase**, response fields are
+**snake_case**. Registration is idempotent — the same API key and hostname
+always return the same token.
 
 The install command is **idempotent** — safe to re-run on the same VM to update or repair the agent.
 
@@ -145,7 +189,7 @@ What the installer actually does (see `install.sh`):
 
 1. **Preflight** — checks root, `curl`, `systemctl`, and required env vars.
 2. **Detect platform** — maps `uname -m` to `amd64`/`arm64`.
-3. **Register** — `POST`s to `https://obs.e2enetworks.net/v1/install/register` with the API key/project/customer IDs; gets back an `ingestion_token` and `log_group`.
+3. **Register** — `POST`s to `E2E_REGISTER_API` with the API key and the VM's hostname; gets back an `ingestion_token`, `project_id`, and `log_group`.
 4. **Download binary** — pulls `e2e-otel-collector-linux-<arch>` from GitHub Pages into `/usr/local/bin/e2e-otelcol`.
 5. **Write config** — env file (mode 600, credentials) at `/etc/e2e-otel-collector/env`, and `samples/vm-config.yaml` (via Pages) at `/etc/e2e-otel-collector/config.yaml`.
 6. **Install & start** the systemd unit, enabling it and (re)starting the service.

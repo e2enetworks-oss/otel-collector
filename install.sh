@@ -2,6 +2,8 @@
 # E2E Observability Agent — VM installer
 # Usage:
 #   E2E_API_KEY=<key> \
+#   E2E_REGISTER_API=http://<obs-api-host>:31881/v1/install/register \
+#   E2E_GATEWAY_ENDPOINT=<gateway-host>:31318 \
 #     bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 
 set -euo pipefail
@@ -17,7 +19,26 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 # Published install assets (install.sh, samples/, mirrored release binaries) are
 # served from GitHub Pages — see .github/workflows/pages.yaml.
 PAGES_BASE="https://e2enetworks-oss.github.io/otel-collector"
-REGISTER_API="https://obs.e2enetworks.net/v1/install/register"
+
+# ── Endpoints ────────────────────────────────────────────────────────────────
+# Both are deployment-specific and have no safe default — set them for your
+# environment, or pass them as env vars at install time.
+#
+# E2E_REGISTER_API   The observability-api REST service. Serves
+#                    POST /v1/install/register, which exchanges the API key for
+#                    an ingestion token, project_id, and log_group.
+#                    Deployed as the `rest` port of the observability-api
+#                    Service (NodePort 31881 in the reference deployment).
+#                    Example: http://<obs-api-host>:31881/v1/install/register
+#
+# E2E_GATEWAY_ENDPOINT
+#                    The otel-gateway OTLP/gRPC listener that the agent ships
+#                    telemetry to. Host:port only — no scheme, no path.
+#                    Port 4317 on the Service (NodePort 31318 in the reference
+#                    deployment).
+#                    Example: <gateway-host>:31318
+REGISTER_API="${E2E_REGISTER_API:-}"
+GATEWAY_ENDPOINT="${E2E_GATEWAY_ENDPOINT:-}"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 info()  { echo "[e2e-install] $*"; }
@@ -32,6 +53,12 @@ preflight() {
   command -v systemctl >/dev/null 2>&1 || error "systemctl not found — this installer requires a systemd-based OS."
 
   [ -n "${E2E_API_KEY:-}" ] || error "E2E_API_KEY is not set."
+
+  # Endpoints are deployment-specific — fail loudly rather than guessing.
+  [ -n "${REGISTER_API:-}" ] || error \
+    "E2E_REGISTER_API is not set. Point it at the observability-api register endpoint, e.g. http://<obs-api-host>:31881/v1/install/register"
+  [ -n "${GATEWAY_ENDPOINT:-}" ] || error \
+    "E2E_GATEWAY_ENDPOINT is not set. Point it at the otel-gateway OTLP/gRPC listener as host:port, e.g. <gateway-host>:31318"
 }
 
 # detect_arch: map `uname -m` to the Go arch string. Echoes amd64|arm64, or
@@ -75,13 +102,21 @@ main() {
   [ -f /etc/os-release ] && OS_ID=$(. /etc/os-release && echo "${ID:-unknown}")
   info "Platform: linux/${ARCH} (${OS_ID:-unknown distro})"
 
+  # hostname is sent so the server derives a per-host log group
+  # (logs.infra.vm.<project_id>.<host>). Sanitized to characters that are
+  # safe inside a JSON string; the server re-sanitizes for group naming.
+  local host_name
+  host_name=$(hostname -f 2>/dev/null || hostname)
+  host_name=${host_name//[^a-zA-Z0-9.-]/}
+
   # Phase 2: Register with E2E Observability API
-  info "Registering with E2E Observability API..."
+  info "Registering with E2E Observability API (host: ${host_name})..."
   REGISTER_RESPONSE=$(curl -fsSL -X POST "${REGISTER_API}" \
     -H "Content-Type: application/json" \
     -d "{
-      \"api_key\":       \"${E2E_API_KEY}\",
-      \"resource_type\": \"vm\"
+      \"apiKey\":       \"${E2E_API_KEY}\",
+      \"resourceType\": \"vm\",
+      \"hostname\":     \"${host_name}\"
     }") || error "Registration API call failed. Check your E2E_API_KEY and network connectivity."
 
   E2E_TOKEN=$(parse_field "${REGISTER_RESPONSE}" "ingestion_token")
@@ -113,15 +148,15 @@ main() {
   chmod 755 "${CONFIG_DIR}"
   chmod 700 "${DATA_DIR}"
 
-  # 4a. Env file (mode 600 — credentials)
-  local host_name
-  host_name=$(hostname -f 2>/dev/null || hostname)
+  # 4a. Env file (mode 600 — credentials). host_name was computed and
+  # sanitized before registration so both use the same value.
   info "Writing env file to ${CONFIG_DIR}/env..."
   cat > "${CONFIG_DIR}/env" <<EOF
 E2E_TOKEN=${E2E_TOKEN}
 HOST_NAME=${host_name}
 E2E_LOG_GROUP=${E2E_LOG_GROUP}
 E2E_PROJECT_ID=${E2E_PROJECT_ID}
+E2E_GATEWAY_ENDPOINT=${GATEWAY_ENDPOINT}
 EOF
   chmod 600 "${CONFIG_DIR}/env"
 
