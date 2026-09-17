@@ -134,7 +134,7 @@ EOF
 exit 0
 EOF
   export E2E_API_KEY=key
-  unset E2E_SITE E2E_REGISTER_API E2E_GATEWAY_ENDPOINT
+  unset E2E_API E2E_INTERNAL_GATEWAY E2E_REGISTER_API E2E_GATEWAY_ENDPOINT
   resolve_endpoints
   run preflight
   [ "$status" -eq 0 ]
@@ -176,41 +176,86 @@ EOF
 # Called directly, never through `run`: it sets globals, and `run` would
 # evaluate it in a subshell where those assignments are thrown away.
 
+clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY E2E_REGISTER_API E2E_GATEWAY_ENDPOINT; }
+
 @test "resolve_endpoints falls back to production with nothing set" {
-  unset E2E_SITE E2E_REGISTER_API E2E_GATEWAY_ENDPOINT
+  clear_endpoint_env
   resolve_endpoints
-  [ "$SITE" = "obs.e2enetworks.net" ]
-  [ "$REGISTER_API" = "https://obs.e2enetworks.net/v1/install/register" ]
-  [ "$GATEWAY_ENDPOINT" = "obs.e2enetworks.net:31318" ]
-  [ "$GATEWAY_DERIVED" = "yes" ]
+  [ "$API_HOST" = "api.e2enetworks.com" ]
+  [ "$REGISTER_API" = "https://api.e2enetworks.com/v1/install/register" ]
+  [ "$GATEWAY_ENDPOINT" = "signals.e2enetworks.net:4317" ]
+  [ "$GATEWAY_DEFAULTED" = "yes" ]
 }
 
-@test "resolve_endpoints derives both endpoints from E2E_SITE" {
-  unset E2E_REGISTER_API E2E_GATEWAY_ENDPOINT
-  export E2E_SITE="api-groot.e2enetworks.net"
+@test "resolve_endpoints builds the register URL from E2E_API" {
+  clear_endpoint_env
+  export E2E_API="api-groot.e2enetworks.net"
   resolve_endpoints
   [ "$REGISTER_API" = "https://api-groot.e2enetworks.net/v1/install/register" ]
-  [ "$GATEWAY_ENDPOINT" = "api-groot.e2enetworks.net:31318" ]
-  [ "$GATEWAY_DERIVED" = "yes" ]
+  # E2E_API selects the API only. The gateway has its own variable.
+  [ "$GATEWAY_ENDPOINT" = "signals.e2enetworks.net:4317" ]
 }
 
 @test "resolve_endpoints lets E2E_REGISTER_API win over the derived URL" {
-  unset E2E_GATEWAY_ENDPOINT
-  export E2E_SITE="api-groot.e2enetworks.net"
+  clear_endpoint_env
+  export E2E_API="api-groot.e2enetworks.net"
   export E2E_REGISTER_API="http://10.0.0.5:31881/v1/install/register"
   resolve_endpoints
   [ "$REGISTER_API" = "http://10.0.0.5:31881/v1/install/register" ]
-  # The site still drives the endpoint that was not overridden.
-  [ "$GATEWAY_ENDPOINT" = "api-groot.e2enetworks.net:31318" ]
 }
 
-@test "resolve_endpoints marks an explicit gateway as not derived" {
-  unset E2E_SITE E2E_REGISTER_API
-  export E2E_GATEWAY_ENDPOINT="10.0.0.5:31318"
+@test "resolve_endpoints takes the gateway from E2E_INTERNAL_GATEWAY" {
+  clear_endpoint_env
+  export E2E_INTERNAL_GATEWAY="10.0.0.5:31318"
   resolve_endpoints
   [ "$GATEWAY_ENDPOINT" = "10.0.0.5:31318" ]
-  # Drives check_gateway: a guessed endpoint is fatal, a supplied one warns.
-  [ "$GATEWAY_DERIVED" = "no" ]
+  # Drives check_gateway: a defaulted endpoint is fatal, a chosen one warns.
+  [ "$GATEWAY_DEFAULTED" = "no" ]
+}
+
+@test "resolve_endpoints lets E2E_GATEWAY_ENDPOINT win over E2E_INTERNAL_GATEWAY" {
+  clear_endpoint_env
+  export E2E_INTERNAL_GATEWAY="from-internal.example"
+  export E2E_GATEWAY_ENDPOINT="from-endpoint.example:31318"
+  resolve_endpoints
+  [ "$GATEWAY_ENDPOINT" = "from-endpoint.example:31318" ]
+  [ "$GATEWAY_DEFAULTED" = "no" ]
+}
+
+# ── normalize_gateway ────────────────────────────────────────────────────────
+
+@test "normalize_gateway appends the default OTLP port to a bare host" {
+  run normalize_gateway "signals.e2enetworks.net"
+  [ "$status" -eq 0 ]
+  [ "$output" = "signals.e2enetworks.net:4317" ]
+}
+
+@test "normalize_gateway leaves an explicit port alone" {
+  run normalize_gateway "10.0.0.5:31318"
+  [ "$status" -eq 0 ]
+  [ "$output" = "10.0.0.5:31318" ]
+}
+
+# ── posthog_capture ──────────────────────────────────────────────────────────
+
+@test "posthog_capture is a no-op when no key is configured" {
+  unset E2E_POSTHOG_KEY
+  # A curl stub that fails loudly proves the function never reached the network.
+  stub curl <<'EOF'
+#!/usr/bin/env bash
+echo "curl was called"; exit 1
+EOF
+  run posthog_capture "vm_agent_installed" '"arch":"amd64"'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "posthog_capture never fails the install when the endpoint is down" {
+  export E2E_POSTHOG_KEY="phc_test"
+  export E2E_POSTHOG_HOST="http://127.0.0.1:1"
+  INSTALL_ID="deadbeef"
+  run posthog_capture "vm_agent_installed" '"arch":"amd64"'
+  [ "$status" -eq 0 ]
 }
 
 # ── gateway_reachable ────────────────────────────────────────────────────────

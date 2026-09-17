@@ -4,9 +4,9 @@
 #   E2E_API_KEY=<key> \
 #     bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 #
-# That installs against production. To install against a dev stack, add E2E_SITE
+# That installs against production. To install against a dev stack, add E2E_API
 # — see the Endpoints block below for that and the per-endpoint overrides:
-#   E2E_API_KEY=<key> E2E_SITE=api-groot.e2enetworks.net \
+#   E2E_API_KEY=<key> E2E_API=api-groot.e2enetworks.net \
 #     bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 
 set -euo pipefail
@@ -24,33 +24,44 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 PAGES_BASE="https://e2enetworks-oss.github.io/otel-collector"
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
-# E2E_API_KEY is the only value a customer supplies; everything below defaults
-# to production. The overrides exist for engineers installing against one of the
-# dev deployments, and each is narrower than the one before it:
+# E2E_API_KEY is the only value a customer supplies. Everything below is static
+# for production and exists so engineers can install against a dev stack.
 #
-# E2E_SITE           The deployment to install against — hostname only, no
-#                    scheme and no port. Both endpoints derive from it, so this
-#                    is the single knob a dev environment normally needs.
+# E2E_API            The API host that issued the key and mints the ingestion
+#                    token. Hostname only, no scheme and no path.
 #                    Default: production. Example: api-groot.e2enetworks.net
 #
-# E2E_REGISTER_API   Full register URL, for a deployment that does not follow
-#                    the derived shape — a NodePort, say. Serves
-#                    POST /v1/install/register, which exchanges the API key for
-#                    an ingestion token, project_id, and log_group (the `rest`
-#                    port of the observability-api Service, NodePort 31881 in
-#                    the reference deployment).
-#                    Example: http://10.0.0.5:31881/v1/install/register
+# E2E_INTERNAL_GATEWAY
+#                    The gateway the agent ships signals to. Hostname, or
+#                    host:port when it is not on the default OTLP/gRPC port.
+#                    Default: production. Example: 10.0.0.5:31318
+#
+# E2E_REGISTER_API   Full register URL, for a deployment whose API does not sit
+#                    at https://<host><REGISTER_PATH> — a NodePort, say:
+#                    http://10.0.0.5:31881/v1/install/register
 #
 # E2E_GATEWAY_ENDPOINT
-#                    The otel-gateway OTLP/gRPC listener the agent ships
-#                    telemetry to. Host:port only — no scheme, no path. Port
-#                    4317 on the Service, NodePort 31318 in the reference
-#                    deployment. Example: 10.0.0.5:31318
+#                    Alias for E2E_INTERNAL_GATEWAY, kept because it is the name
+#                    the collector config and the env file already use.
 #
 # Shaped after Datadog's DD_SITE: one variable selects the environment, and the
 # per-endpoint variables stay as escape hatches for what it cannot express.
-DEFAULT_SITE="obs.e2enetworks.net"
-GATEWAY_PORT="31318"
+DEFAULT_API="api.e2enetworks.com"
+DEFAULT_GATEWAY="signals.e2enetworks.net"
+
+# The OTLP/gRPC port assumed when E2E_INTERNAL_GATEWAY names a host with no
+# port. 4317 is the OTel standard and the `grpc` port on the gateway Service;
+# 31318 is only its NodePort, so a hostname fronting a load balancer lands here.
+DEFAULT_GATEWAY_PORT="4317"
+
+# Path the API serves agent registration on.
+#
+# TARGET: /v1/signals/agents. The current route is the one that is live today —
+# pointing at the target before the observability-api ships it would 404 every
+# install. Moving over is this one line plus its test, once that route exists.
+# See docs/REST_API_DESIGN_GUIDELINES.md §1 for why it is a plural noun and not
+# /signals/register: "register" is a verb, and enrolment creates an agent.
+REGISTER_PATH="/v1/install/register"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 info()  { echo "[e2e-install] $*"; }
@@ -85,23 +96,38 @@ trap cleanup EXIT
 
 # ── Pure functions (unit-testable via bats) ──────────────────────────────────
 
-# resolve_endpoints: fill SITE, REGISTER_API, GATEWAY_ENDPOINT and
-# GATEWAY_DERIVED from the environment. Precedence runs narrowest first — an
-# explicit per-endpoint override, then E2E_SITE, then production. Sets globals
-# rather than echoing because it resolves four values; bats drives it with an
-# environment and reads them back.
-resolve_endpoints() {
-  SITE="${E2E_SITE:-${DEFAULT_SITE}}"
-  REGISTER_API="${E2E_REGISTER_API:-https://${SITE}/v1/install/register}"
-  GATEWAY_ENDPOINT="${E2E_GATEWAY_ENDPOINT:-${SITE}:${GATEWAY_PORT}}"
+# normalize_gateway <host-or-host:port>: echo host:port, filling in the default
+# OTLP/gRPC port when the value names a bare host. Lets E2E_INTERNAL_GATEWAY be
+# written the way people say it out loud — "signals.e2enetworks.net".
+normalize_gateway() {
+  case "$1" in
+    *:*) echo "$1" ;;
+    *)   echo "$1:${DEFAULT_GATEWAY_PORT}" ;;
+  esac
+}
 
-  # Whether the gateway was derived or supplied decides how hard we check it
-  # below: a value the operator typed is their claim to make, a value this
-  # script guessed has to prove itself before we ship telemetry at it.
-  if [ -n "${E2E_GATEWAY_ENDPOINT:-}" ]; then
-    GATEWAY_DERIVED="no"
+# resolve_endpoints: fill API_HOST, REGISTER_API, GATEWAY_ENDPOINT and
+# GATEWAY_DEFAULTED from the environment. Precedence runs narrowest first — an
+# explicit per-endpoint override, then the host variable, then production. Sets
+# globals rather than echoing because it resolves four values; bats drives it
+# with an environment and reads them back.
+resolve_endpoints() {
+  API_HOST="${E2E_API:-${DEFAULT_API}}"
+  REGISTER_API="${E2E_REGISTER_API:-https://${API_HOST}${REGISTER_PATH}}"
+
+  # E2E_GATEWAY_ENDPOINT is the older spelling and still the name written into
+  # the env file, so it wins where both are set.
+  local gw="${E2E_GATEWAY_ENDPOINT:-${E2E_INTERNAL_GATEWAY:-${DEFAULT_GATEWAY}}}"
+  GATEWAY_ENDPOINT="$(normalize_gateway "${gw}")"
+
+  # Whether the gateway is this script's default or somebody's choice decides
+  # how hard we check it below: a value an operator typed is their claim to
+  # make, a value this script supplied has to prove itself before we ship
+  # telemetry at it.
+  if [ -n "${E2E_GATEWAY_ENDPOINT:-}${E2E_INTERNAL_GATEWAY:-}" ]; then
+    GATEWAY_DEFAULTED="no"
   else
-    GATEWAY_DERIVED="yes"
+    GATEWAY_DEFAULTED="yes"
   fi
 }
 
@@ -147,25 +173,47 @@ check_gateway() {
     info "Gateway reachable."
     return 0
   fi
-  if [ "${GATEWAY_DERIVED}" = "yes" ]; then
+  if [ "${GATEWAY_DEFAULTED}" = "yes" ]; then
     error "Cannot reach the default gateway ${GATEWAY_ENDPOINT}. This host may be \
 outside the E2E internal network, or this deployment may use a different gateway. \
-Set E2E_SITE for your environment, or E2E_GATEWAY_ENDPOINT=<host>:<port> for the \
-gateway directly, then re-run. Installing now would collect telemetry and drop it."
+Set E2E_INTERNAL_GATEWAY=<host> (or <host>:<port>) for your environment, then \
+re-run. Installing now would collect telemetry and drop it."
   fi
   info "WARNING: ${GATEWAY_ENDPOINT} is not reachable from this host right now. \
 Continuing because you set it explicitly — until it opens, the agent collects \
 and drops telemetry with no error beyond the service journal."
 }
 
-# sha256_of <file>: echo the file's sha256, using whichever tool the distro ships.
-sha256_of() {
+# posthog_capture <event> <properties-json-fragment>: best-effort install
+# telemetry. Never fails the install — analytics being down is not an install
+# error — and never blocks it for longer than the curl bounds allow.
+#
+# There is no key committed here on purpose. PostHog project keys are designed
+# to be public, but which project, which region, and whether an install event
+# may carry tenant identifiers are decisions for the maintainer, not defaults
+# for a script to pick. Unset means this function does nothing at all.
+posthog_capture() {
+  local event="$1" props="$2"
+  [ -n "${E2E_POSTHOG_KEY:-}" ] || return 0
+  local host="${E2E_POSTHOG_HOST:-https://app.posthog.com}"
+  curl "${CURL_OPTS[@]}" -X POST "${host}/capture/" \
+    -H "Content-Type: application/json" \
+    -d "{\"api_key\":\"${E2E_POSTHOG_KEY}\",\"event\":\"${event}\",\
+\"distinct_id\":\"${INSTALL_ID}\",\"properties\":{${props}}}" \
+    >/dev/null 2>&1 || true
+}
+
+# sha256_hex: read stdin, echo its sha256, using whichever tool the distro ships.
+sha256_hex() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+    sha256sum | awk '{print $1}'
   else
-    shasum -a 256 "$1" | awk '{print $1}'
+    shasum -a 256 | awk '{print $1}'
   fi
 }
+
+# sha256_of <file>: echo the file's sha256.
+sha256_of() { sha256_hex < "$1"; }
 
 # checksum_for <checksums-text> <filename>: echo the published sha256 for that
 # file, or nothing when it is not listed. Pure, so bats covers the parsing.
@@ -219,8 +267,7 @@ main() {
   info "Running preflight checks..."
   resolve_endpoints
   preflight
-  info "Preflight passed. Site: ${SITE}"
-  check_gateway
+  info "Preflight passed. API: ${API_HOST}"
 
   # Phase 1: Detect platform
   info "Detecting platform..."
@@ -237,6 +284,11 @@ main() {
   host_name=$(hostname -f 2>/dev/null || hostname)
   host_name=${host_name//[^a-zA-Z0-9.-]/}
 
+  # Stable per-host pseudonym for install telemetry. Hashed rather than raw so
+  # the hostname itself does not leave the network by default; swap it for
+  # project_id if attribution to an account is wanted (see posthog_capture).
+  INSTALL_ID=$(printf '%s' "${host_name}" | sha256_hex)
+
   # Phase 2: Register with E2E Observability API
   info "Registering with E2E Observability API (host: ${host_name})..."
   REGISTER_RESPONSE=$(curl "${CURL_OPTS[@]}" -X POST "${REGISTER_API}" \
@@ -250,12 +302,31 @@ main() {
   E2E_TOKEN=$(parse_field "${REGISTER_RESPONSE}" "ingestion_token")
   E2E_LOG_GROUP=$(parse_field "${REGISTER_RESPONSE}" "log_group")
   E2E_PROJECT_ID=$(parse_field "${REGISTER_RESPONSE}" "project_id")
+  # Not asserted below: neither field is served by the current route. customer_id
+  # lands when the API returns it, gateway_endpoint lets the API decide where a
+  # tenant's signals go instead of this script assuming it.
+  E2E_CUSTOMER_ID=$(parse_field "${REGISTER_RESPONSE}" "customer_id")
+  local served_gateway
+  served_gateway=$(parse_field "${REGISTER_RESPONSE}" "gateway_endpoint")
 
   [ -n "${E2E_TOKEN:-}"     ] || error "Registration failed: ingestion_token missing. Check your credentials."
   [ -n "${E2E_LOG_GROUP:-}" ] || error "Registration failed: log_group missing. Check your credentials."
   [ -n "${E2E_PROJECT_ID:-}" ] || error "Registration failed: project_id missing. Check your credentials."
 
   info "Registered. Log group: ${E2E_LOG_GROUP}"
+
+  # An endpoint the API named beats anything this script defaulted to: it knows
+  # which gateway serves this tenant, and it is authoritative per environment.
+  if [ -n "${served_gateway}" ] && [ -z "${E2E_GATEWAY_ENDPOINT:-}${E2E_INTERNAL_GATEWAY:-}" ]; then
+    GATEWAY_ENDPOINT="$(normalize_gateway "${served_gateway}")"
+    GATEWAY_DEFAULTED="no"
+    info "Gateway supplied by the API: ${GATEWAY_ENDPOINT}"
+  fi
+
+  # Checked after registration because the response may name the gateway, and
+  # before the download because that is the expensive step worth protecting.
+  # Registration is idempotent, so failing here costs nothing but a retry.
+  check_gateway
 
   # Phase 3: Download binary
   info "Downloading E2E OTel Collector binary (linux/${ARCH})..."
@@ -288,6 +359,7 @@ E2E_TOKEN=${E2E_TOKEN}
 HOST_NAME=${host_name}
 E2E_LOG_GROUP=${E2E_LOG_GROUP}
 E2E_PROJECT_ID=${E2E_PROJECT_ID}
+E2E_CUSTOMER_ID=${E2E_CUSTOMER_ID}
 E2E_GATEWAY_ENDPOINT=${GATEWAY_ENDPOINT}
 EOF
   chmod 600 "${CONFIG_DIR}/env"
@@ -336,6 +408,13 @@ EOF
     systemctl start "${SERVICE_NAME}"
     info "Service started."
   fi
+
+  # Install telemetry. Last, so it reports only installs that actually finished,
+  # and best-effort, so it can never be the reason one fails.
+  posthog_capture "vm_agent_installed" \
+    "\"arch\":\"${ARCH}\",\"distro\":\"${OS_ID:-unknown}\",\
+\"api_host\":\"${API_HOST}\",\"gateway\":\"${GATEWAY_ENDPOINT}\",\
+\"collector_binary\":\"e2e-otel-collector-linux-${ARCH}\""
 
   # Done
   echo ""

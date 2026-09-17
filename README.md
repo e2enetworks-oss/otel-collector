@@ -19,7 +19,7 @@ E2E_API_KEY=<your-api-key> \
   bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 ```
 
-Root, systemd, `curl`, and a Linux VM on amd64 or arm64. The API key is the only value you supply — the register call derives your project from it and returns the ingestion token, project id, and log group. The VM's hostname is sent automatically, which is what gives each host its own log group.
+Root, systemd, `curl`, and a Linux VM on amd64 or arm64. The API key is the only value you supply — the register call derives your tenant from it and returns the signal ingestion token used for logs, metrics and traces, alongside the project id. The VM's hostname is sent automatically, which is what gives each host its own log group.
 
 Full operator guide, including verification and uninstall: [Install the Virtual Machine Collector](https://runbooks.e2enetworks.net/observability/agents/vm/install) (internal).
 
@@ -30,14 +30,17 @@ Engineers installing against a dev stack override the target. Each variable is n
 | Variable | Default | Use when |
 |---|---|---|
 | `E2E_API_KEY` | — **required** | Always. From MyAccount → API IAM. |
-| `E2E_SITE` | `obs.e2enetworks.net` | Installing against a dev deployment. Hostname only, no scheme or port. Both endpoints derive from it. |
-| `E2E_REGISTER_API` | `https://$E2E_SITE/v1/install/register` | The register URL does not follow that shape — a NodePort, say: `http://10.0.0.5:31881/v1/install/register`. |
-| `E2E_GATEWAY_ENDPOINT` | `$E2E_SITE:31318` | The gateway is somewhere else. `host:port` only, no scheme, no path. |
+| `E2E_API` | `api.e2enetworks.com` | The key came from a dev API. Hostname only, no scheme or path. |
+| `E2E_INTERNAL_GATEWAY` | `signals.e2enetworks.net` | Signals go somewhere other than production. Hostname, or `host:port` when it is not on `4317`. |
+| `E2E_REGISTER_API` | `https://$E2E_API/v1/install/register` | The API does not sit at that path — a NodePort, say: `http://10.0.0.5:31881/v1/install/register`. |
+| `E2E_GATEWAY_ENDPOINT` | — | Alias for `E2E_INTERNAL_GATEWAY`; it is the name the collector config and env file already use, so it wins where both are set. |
 
 ```bash
-E2E_API_KEY=<key> E2E_SITE=api-groot.e2enetworks.net \
+E2E_API_KEY=<key> E2E_API=api-groot.e2enetworks.net \
   bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 ```
+
+If the register response carries a `gateway_endpoint`, it beats the default — the API knows which gateway serves that tenant. An explicitly set gateway still wins over both.
 
 The installer refuses to finish if it cannot open a TCP connection to a gateway it derived itself, because an unreachable gateway does not stop the collector — the service stays `active`, retries each batch for five minutes and then drops it, so the only symptom is missing data. A gateway you set explicitly warns instead and continues.
 
@@ -93,7 +96,13 @@ make changelog VERSION=x.y.z   # prepend a CHANGELOG entry from git log since th
 
 CI runs `make lint` then `make test` on every push and PR; gitleaks scans separately.
 
-`install.sh`'s testable logic — `resolve_endpoints`, `preflight`, `detect_arch`, `parse_field`, `checksum_for`, `gateway_reachable` — is written as pure functions behind a `BASH_SOURCE` guard, so the bats suite sources the script without running the installer.
+`install.sh`'s testable logic — `resolve_endpoints`, `normalize_gateway`, `preflight`, `detect_arch`, `parse_field`, `checksum_for`, `gateway_reachable`, `posthog_capture` — is written as pure functions behind a `BASH_SOURCE` guard, so the bats suite sources the script without running the installer.
+
+### Install telemetry
+
+The installer posts a `vm_agent_installed` event to PostHog after the service starts, carrying architecture, distribution, API host, gateway and binary name, keyed by a SHA-256 of the hostname. It is best-effort and never fails an install.
+
+**No key is committed.** `posthog_capture` does nothing unless `E2E_POSTHOG_KEY` is set (with `E2E_POSTHOG_HOST` defaulting to `https://app.posthog.com`). Which project, which region, and whether an install event may carry `customer_id`/`project_id` are decisions for the maintainer, not defaults for a script to pick.
 
 Two things to know about the suite before trusting it:
 
