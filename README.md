@@ -1,259 +1,130 @@
 # E2E OTel Collector
 
-A custom-built [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) distribution for E2E Networks. It assembles a single, purpose-built binary (`e2e-otel-collector-app`, shipped to users as `e2e-otelcol`) via the [OpenTelemetry Collector Builder (ocb)](https://github.com/open-telemetry/opentelemetry-collector/tree/main/cmd/builder), and provides the installer + reference config that turn any Linux VM into an E2E Observability Agent in about two minutes.
+A custom [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) distribution for E2E Networks, plus the installer that turns a Linux VM into an E2E Observability Agent.
 
-This repo owns three things:
+The repo owns three things:
 
-1. **The builder manifests** (`collector/`) that define which OTel components go into the binary.
-2. **The CI pipeline** (`.github/workflows/`) that builds, releases, and publishes that binary for Linux (amd64/arm64) and Windows (amd64).
-3. **The VM installer** (`install.sh` + `samples/vm-config.yaml`) that end users run to deploy the agent.
+1. **Builder manifests** (`collector/`) — which OTel components go into the binary.
+2. **CI** (`.github/workflows/`) — builds, releases and publishes it for Linux amd64/arm64 and Windows amd64.
+3. **The installer** (`install.sh` + `samples/vm-config.yaml`) — what end users run.
 
-There is no hand-written collector Go source in this repo — the binary's `main.go`/`components.go` are generated at build time by `ocb` from the manifests below and compiled directly in CI. Nothing under `collector/dist*` is committed (see `.gitignore` / `.gitleaks.toml`).
+There is no hand-written collector Go source here. `main.go` and `components.go` are generated at build time by [ocb](https://github.com/open-telemetry/opentelemetry-collector/tree/main/cmd/builder) from the manifests, compiled in CI, and never committed.
+
+---
+
+## Install
+
+```bash
+E2E_API_KEY=<your-api-key> \
+  bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
+```
+
+Root, systemd, `curl`, and a Linux VM on amd64 or arm64. The API key is the only value you supply — the register call derives your tenant from it and returns the signal ingestion token used for logs, metrics and traces, alongside the project id. The VM's hostname is sent automatically, which is what gives each host its own log group.
+
+Full operator guide, including verification and uninstall: [Install the Virtual Machine Collector](https://runbooks.e2enetworks.net/observability/agents/vm/install) (internal).
+
+### Pointing at a different deployment
+
+Engineers installing against a dev stack override the target. Each variable is narrower than the one above it:
+
+| Variable | Default | Use when |
+|---|---|---|
+| `E2E_API_KEY` | — **required** | Always. From MyAccount → API IAM. |
+| `E2E_API` | `api.e2enetworks.com` | The key came from a dev API. Hostname only, no scheme or path. |
+| `E2E_INTERNAL_GATEWAY` | `signals.e2enetworks.net` | Signals go somewhere other than production. Hostname, or `host:port` when it is not on `4317`. |
+| `E2E_REGISTER_API` | `https://$E2E_API/v1/install/register` | The API does not sit at that path — a NodePort, say: `http://10.0.0.5:31881/v1/install/register`. |
+| `E2E_GATEWAY_ENDPOINT` | — | Alias for `E2E_INTERNAL_GATEWAY`; it is the name the collector config and env file already use, so it wins where both are set. |
+
+```bash
+E2E_API_KEY=<key> E2E_API=api-groot.e2enetworks.net \
+  bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
+```
+
+If the register response carries a `gateway_endpoint`, it beats the default — the API knows which gateway serves that tenant. An explicitly set gateway still wins over both.
+
+The installer refuses to finish if it cannot open a TCP connection to a gateway it derived itself, because an unreachable gateway does not stop the collector — the service stays `active`, retries each batch for five minutes and then drops it, so the only symptom is missing data. A gateway you set explicitly warns instead and continues.
+
+It also verifies the downloaded binary against the published `checksums.txt` and refuses on a mismatch, on an unlisted file, or when the manifest cannot be fetched. A failed install leaves no partial binary behind.
+
+Re-running the installer on the same VM is safe: registration returns the same token for the same key and hostname, and the config, env file and unit are rewritten.
 
 ---
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                         e2e-otelcol (single binary)                  │
-│                                                                        │
-│  Receivers                Processors              Exporters          │
-│  ──────────               ───────────              ─────────         │
-│  otlp            ──┐                                                 │
-│  filelog            │     memory_limiter                             │
-│  journald   ────────┼──▶  resource         ──▶   otlp/gateway ───────┼──▶ E2E
-│  hostmetrics         │    k8sattributes           (gRPC, mTLS/token)  │   Observability
-│  kubeletstats        │    batch                                      │   Gateway
-│  prometheus  ───────┘                                                │   (NATS → Vector →
-│                                                                        │    ClickHouse)
-│  Extensions: health_check (13133), file_storage (offset checkpoints) │
-└──────────────────────────────────────────────────────────────────────┘
-        ▲                              ▲
-        │ runs as                      │ runs as
-   systemd service                DaemonSet / sidecar
-   on a Linux VM                  on Kubernetes
-```
+One binary runs everywhere. Which components are active is decided by the config file passed at startup (`--config=...`), not by a rebuild — `samples/vm-config.yaml` wires up only `hostmetrics`, `journald` and `filelog`, leaving the Kubernetes components compiled in but idle.
 
-The binary is **environment-agnostic** — the same compiled artifact runs on a bare VM (as a systemd service) or inside Kubernetes (as a DaemonSet). Which receivers/processors are actually active is decided entirely by the **config file** handed to it at startup (`--config=...`), not by a rebuild. For example, `samples/vm-config.yaml` only wires up `hostmetrics`, `journald`, and `filelog` for the VM use case; `kubeletstats` and `k8sattributes` are compiled in but simply unused unless a Kubernetes config enables them.
+| | Components |
+|---|---|
+| Receivers | `otlp`, `filelog`, `journald`, `hostmetrics`, `kubeletstats`, `prometheus` |
+| Processors | `memory_limiter`, `resource`, `k8sattributes`, `batch` |
+| Exporters | `otlp/gateway` — gRPC to the E2E gateway, token auth |
+| Extensions | `health_check` (:13133), `file_storage` (offset checkpoints) |
 
-Two builder manifests produce two variants of the same binary:
+Signals leave the agent over OTLP/gRPC to the E2E Observability Gateway, and from there to NATS → Vector → ClickHouse.
 
-| Manifest | Platform | Notes |
+Two manifests build two variants:
+
+| Manifest | Platform | Difference |
 |---|---|---|
-| `collector/builder-config.yaml` | Linux (amd64, arm64) | Full component set, including `journaldreceiver` (needs `libsystemd`/CGO) |
-| `collector/builder-config-windows.yaml` | Windows (amd64) | Identical, minus `journaldreceiver` — no systemd journal on Windows, and it's CGO-only anyway |
+| `collector/builder-config.yaml` | Linux amd64, arm64 | Full set, including `journaldreceiver` (needs `libsystemd`, so CGO on) |
+| `collector/builder-config-windows.yaml` | Windows amd64 | No `journaldreceiver` — no systemd journal on Windows, and it is CGO-only |
 
 ---
 
-## Repo layout
+## Layout
 
 ```
-.
-├── collector/
-│   ├── builder-config.yaml          # ocb manifest — Linux (amd64/arm64) build
-│   └── builder-config-windows.yaml  # ocb manifest — Windows build (no journaldreceiver)
-├── samples/
-│   └── vm-config.yaml               # Reference OTel pipeline config for VM installs
-├── install.sh                       # VM installer (registers, downloads binary, installs systemd unit)
-├── tests/
-│   └── install.bats                 # bats unit tests for install.sh's pure functions
-├── .github/workflows/
-│   ├── release.yaml                 # Build matrix, GitHub Release, Pages mirror
-│   ├── pages.yaml                   # Re-publish install assets when install.sh/samples change
-│   ├── lint.yaml                    # shellcheck + go vet/lint + bats, on every push/PR
-│   └── gitleaks.yml                 # Secret scanning on every push/PR
-├── .golangci.yml                    # Lint rules for the (future) hand-written Go source
-├── .gitleaks.toml                   # Secret-scan allowlist (ocb output, ${env:...} placeholders)
-├── Makefile                         # make lint / make test / make changelog
-└── CHANGELOG.md                     # Generated via `make changelog VERSION=x.y.z`
+collector/            ocb manifests (Linux + Windows)
+samples/              reference OTel pipeline config for VM installs
+install.sh            the VM installer
+tests/install.bats    unit tests for install.sh's pure functions
+.github/workflows/    release, pages, lint, gitleaks
+Makefile              make lint / make test / make changelog
 ```
-
----
-
-## How the binary is built
-
-The collector's Go source does not live in this repo — it's generated fresh on every build:
-
-1. CI installs the pinned `ocb` (`go install go.opentelemetry.io/collector/cmd/builder@v0.148.0`).
-2. `ocb` reads the manifest (`collector/builder-config.yaml` or `-windows.yaml`) and generates `main.go`, `components.go`, and a `go.mod` under `collector/dist/` (or `dist-win/`) wiring up exactly the receivers/processors/exporters/extensions listed.
-3. `go build` compiles that generated module into the final binary.
-
-This is why `Makefile`'s `lint-go` / `fmt` / `vet` targets currently no-op — there's no `go.mod` checked into the repo for them to find, only the manifests that describe what `ocb` should generate. If hand-written custom components are added later, they'd land as their own Go module and these targets pick them up automatically (see the comment at the top of the `Makefile`).
-
-### Build matrix (`.github/workflows/release.yaml`)
-
-| Binary | Runner | GOOS/GOARCH | CGO | Builder config |
-|---|---|---|---|---|
-| `e2e-otel-collector-linux-amd64` | `ubuntu-latest` | linux/amd64 | on (needs `libsystemd-dev` for journald) | `builder-config.yaml` |
-| `e2e-otel-collector-linux-arm64` | `ubuntu-24.04-arm` | linux/arm64 | on | `builder-config.yaml` |
-| `e2e-otel-collector-windows-amd64.exe` | `ubuntu-latest` (cross-compiled) | windows/amd64 | off | `builder-config-windows.yaml` |
-
-### Release & versioning contract
-
-- Releases are cut from a `v*` git tag (e.g. `v0.148.0`), pushed by a human — there's no auto-tag-on-merge.
-- The `verify-tag` job enforces that a tag's version **matches** `otelcol_version` in `collector/builder-config.yaml`. A `-e2e.N` build suffix is allowed for multiple E2E builds off the same upstream OTel version (e.g. `v0.148.0-e2e.1`).
-- `workflow_dispatch` lets you re-run a release for an existing tag without re-pushing it.
-- On release, all three binaries + `checksums.txt` are attached to a GitHub Release, and the same run's `mirror-pages` job republishes them (plus `install.sh` and `samples/vm-config.yaml`) to GitHub Pages at `https://e2enetworks-oss.github.io/otel-collector/` — this is the URL `install.sh` downloads from.
-- `pages.yaml` separately re-deploys the Pages site whenever `install.sh` or `samples/` change on `main`, so a docs-only change never goes stale or wipes the mirrored binaries.
 
 ---
 
 ## Development
 
 ```bash
-make help        # list all targets
-make lint         # shellcheck install.sh + go vet/golangci-lint (no-op until Go source lands)
-make test         # bats tests/  — unit tests for install.sh's pure functions
-make fmt          # gofmt -w -s (no-op until Go source lands)
-make changelog VERSION=x.y.z   # prepend a CHANGELOG.md entry from git log since the last tag
+make help                      # list targets
+make lint                      # shellcheck install.sh (+ go vet once Go source lands)
+make test                      # bats tests/
+make changelog VERSION=x.y.z   # prepend a CHANGELOG entry from git log since the last tag
 ```
 
-CI (`lint.yaml`) runs `make lint` then `make test` on every push/PR to `main`. `gitleaks.yml` scans for committed secrets on every push/PR; `.gitleaks.toml` allowlists `collector/dist*` (ocb-generated output) and `${env:VAR}` placeholders in configs.
+CI runs `make lint` then `make test` on every push and PR; gitleaks scans separately.
 
-`install.sh`'s testable logic (`detect_arch`, `parse_field`, `preflight`) is written as pure functions and guarded behind a `BASH_SOURCE` check so `tests/install.bats` can `source` the script without triggering `main()`.
+`install.sh`'s testable logic — `resolve_endpoints`, `normalize_gateway`, `preflight`, `detect_arch`, `parse_field`, `checksum_for`, `gateway_reachable`, `posthog_capture` — is written as pure functions behind a `BASH_SOURCE` guard, so the bats suite sources the script without running the installer.
+
+### Install telemetry
+
+The installer posts a `vm_agent_installed` event to PostHog after the service starts, carrying architecture, distribution, API host, gateway and binary name, keyed by a SHA-256 of the hostname. It is best-effort and never fails an install.
+
+**No key is committed.** `posthog_capture` does nothing unless `E2E_POSTHOG_KEY` is set (with `E2E_POSTHOG_HOST` defaulting to `https://app.posthog.com`). Which project, which region, and whether an install event may carry `customer_id`/`project_id` are decisions for the maintainer, not defaults for a script to pick.
+
+Two things to know about the suite before trusting it:
+
+- `setup()` must leave errexit **on**. bats decides pass/fail from it, and a `set +e` there makes every assertion in the file advisory — `[ 1 -eq 2 ]` reports `ok`.
+- With errexit on, a failing test prints no `not ok` line. It vanishes from the output and bats reports `Executed N instead of expected M` with exit 1. **Gate on the exit code, never on grepping `not ok`.**
+
+Mutation-check after changing the suite: break one assertion and confirm `bats tests/` exits non-zero.
 
 ---
 
-## Install (end users)
+## Builds and releases
 
-Install the E2E Observability Agent on your Linux VM to start collecting logs and metrics in your E2E dashboard within 2 minutes.
+1. CI installs the pinned ocb (`go install go.opentelemetry.io/collector/cmd/builder@v0.148.0`).
+2. ocb reads a manifest and generates `main.go`, `components.go` and `go.mod` under `collector/dist/`.
+3. `go build` compiles that generated module.
 
-### Requirements
+| Binary | Runner | GOOS/GOARCH | CGO |
+|---|---|---|---|
+| `e2e-otel-collector-linux-amd64` | `ubuntu-latest` | linux/amd64 | on |
+| `e2e-otel-collector-linux-arm64` | `ubuntu-24.04-arm` | linux/arm64 | on |
+| `e2e-otel-collector-windows-amd64.exe` | `ubuntu-latest` (cross) | windows/amd64 | off |
 
-- Linux VM (x86_64 or ARM64)
-- Running as **root**
-- `curl` installed
-- systemd-based OS (Ubuntu, AlmaLinux, RHEL, Debian, etc.)
-- Network reach to your observability deployment — the register API
-  (`E2E_REGISTER_API`) and the telemetry gateway (`E2E_GATEWAY_ENDPOINT`)
+Releases are cut from a `v*` tag pushed by a human — there is no auto-tag on merge. The `verify-tag` job enforces that the tag matches `otelcol_version` in `collector/builder-config.yaml`; a `-e2e.N` suffix allows several E2E builds off one upstream version (`v0.148.0-e2e.1`). `workflow_dispatch` re-runs a release for an existing tag.
 
-### Install
-
-```bash
-E2E_API_KEY=<your-api-key> \
-E2E_REGISTER_API=http://<obs-api-host>:31881/v1/install/register \
-E2E_GATEWAY_ENDPOINT=<gateway-host>:31318 \
-  bash -c "$(curl -fsSL https://raw.githubusercontent.com/e2enetworks-oss/otel-collector/main/install.sh)"
-```
-
-| Variable | What it is | Where to find it |
-|---|---|---|
-| `E2E_API_KEY` | Your account credential | MyAccount → API IAM |
-| `E2E_REGISTER_API` | `observability-api` register endpoint — the `rest` port of the `observability-api` Service (NodePort **31881** in the reference deployment). Full URL including `/v1/install/register`. | Ask your observability admin |
-| `E2E_GATEWAY_ENDPOINT` | `otel-gateway` OTLP/gRPC listener as `host:port` — no scheme, no path. Port 4317 on the Service (NodePort **31318** in the reference deployment). | Ask your observability admin |
-
-The two endpoints are deployment-specific and have **no defaults** — the
-installer's preflight fails with an explicit message if either is unset, rather
-than guessing at an address. `E2E_GATEWAY_ENDPOINT` is written into
-`/etc/e2e-otel-collector/env` and consumed by the collector config as
-`${env:E2E_GATEWAY_ENDPOINT}`.
-
-`E2E_API_KEY` is the only credential you supply. The register call derives the
-tenant from it server-side and returns `project_id` alongside `log_group`, so
-neither has to be passed by hand. The VM's hostname is sent automatically, which
-is what gives each host its own log group.
-
-#### Register API
-
-`POST <E2E_REGISTER_API>` — the `observability-api` REST service on the
-observability cluster, e.g. `http://<obs-api-host>:31881/v1/install/register`.
-
-Request:
-
-```json
-{
-  "apiKey":       "<your-api-key>",
-  "resourceType": "vm",
-  "hostname":     "web-01"
-}
-```
-
-Response:
-
-```json
-{
-  "ingestion_token": "sk_<project>_<id>",
-  "project_id":      "2dc3a652-3714-5bc4-930c-d8871c32ac94",
-  "log_group":       "logs.infra.vm.2dc3a652-3714-5bc4-930c-d8871c32ac94.web-01"
-}
-```
-
-Note the casing: request fields are **camelCase**, response fields are
-**snake_case**. Registration is idempotent — the same API key and hostname
-always return the same token.
-
-The install command is **idempotent** — safe to re-run on the same VM to update or repair the agent.
-
-What the installer actually does (see `install.sh`):
-
-1. **Preflight** — checks root, `curl`, `systemctl`, and required env vars.
-2. **Detect platform** — maps `uname -m` to `amd64`/`arm64`.
-3. **Register** — `POST`s to `E2E_REGISTER_API` with the API key and the VM's hostname; gets back an `ingestion_token`, `project_id`, and `log_group`.
-4. **Download binary** — pulls `e2e-otel-collector-linux-<arch>` from GitHub Pages into `/usr/local/bin/e2e-otelcol`.
-5. **Write config** — env file (mode 600, credentials) at `/etc/e2e-otel-collector/env`, and `samples/vm-config.yaml` (via Pages) at `/etc/e2e-otel-collector/config.yaml`.
-6. **Install & start** the systemd unit, enabling it and (re)starting the service.
-
-### What gets collected
-
-| Data | Source |
-|---|---|
-| CPU utilization | `/proc/stat` — per core, every 30s |
-| Memory utilization | `/proc/meminfo` — every 30s |
-| Disk I/O | `/proc/diskstats` — every 30s |
-| Network I/O | `/proc/net/dev` — every 30s |
-| Filesystem usage | `statfs()` — every 30s |
-| Load average | `/proc/loadavg` — every 30s |
-| Systemd journal logs | All services on the VM |
-| Syslog / auth logs | `/var/log/messages`, `/var/log/secure` |
-| Application logs | `/var/log/app/*.log`, `/var/log/python/*.log`, `/root/app/*.log`, `/opt/app/*.log` |
-
-All of the above is defined in `samples/vm-config.yaml` — the `hostmetrics`, `journald`, and `filelog/*` receivers, tagged with `host.name`, `log_group`, and `project_id` resource attributes, batched, and shipped over OTLP/gRPC to the E2E gateway (`otlp/gateway` exporter) with token auth and retry-on-failure.
-
-### What you see in the dashboard
-
-Within 2 minutes of install, your VM appears in:
-
-- **Grafana → Observability → Host Metrics** — CPU, memory, disk, network, filesystem panels
-- **Grafana → Logging → OTel Logs** — all systemd and syslog entries, filterable by host
-
-### Manage the agent
-
-```bash
-# Check status
-systemctl status e2e-otel-collector
-
-# Stream live agent logs
-journalctl -u e2e-otel-collector -f
-
-# Check health
-curl -s http://localhost:13133
-
-# Restart after a config change
-systemctl restart e2e-otel-collector
-
-# Stop and disable
-systemctl stop e2e-otel-collector
-systemctl disable e2e-otel-collector
-```
-
-### Files installed on the VM
-
-```
-/usr/local/bin/e2e-otelcol                        ← agent binary
-/etc/e2e-otel-collector/config.yaml               ← pipeline config
-/etc/e2e-otel-collector/env                        ← credentials (root-only)
-/etc/systemd/system/e2e-otel-collector.service     ← systemd unit
-/var/lib/e2e-otel-collector/                       ← state and checkpoints (file_storage extension)
-```
-
-### Uninstall
-
-```bash
-systemctl stop e2e-otel-collector
-systemctl disable e2e-otel-collector
-rm -f /usr/local/bin/e2e-otelcol
-rm -rf /etc/e2e-otel-collector
-rm -f /etc/systemd/system/e2e-otel-collector.service
-systemctl daemon-reload
-```
+On release, the three binaries and `checksums.txt` attach to a GitHub Release, and the same run mirrors them — plus `install.sh` and `samples/` — to <https://e2enetworks-oss.github.io/otel-collector/>, which is where `install.sh` downloads from. `pages.yaml` re-deploys that site whenever `install.sh` or `samples/` change on `main`, re-mirroring the binaries so a docs-only change never wipes them.
