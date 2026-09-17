@@ -121,9 +121,10 @@ EOF
   [[ "$output" == *"E2E_API_KEY is not set"* ]]
 }
 
-# REGISTER_API and GATEWAY_ENDPOINT are resolved from the environment at source
-# time, so a test sets the resolved globals rather than the E2E_* inputs.
-@test "preflight passes with root, tools, key and both endpoints" {
+# preflight reads the resolved globals, which resolve_endpoints fills. The
+# customer path — API key and nothing else — is the case that regressed once
+# already, so it is asserted end to end from an empty environment.
+@test "preflight passes with only E2E_API_KEY set" {
   stub id <<'EOF'
 #!/usr/bin/env bash
 echo "0"
@@ -133,13 +134,13 @@ EOF
 exit 0
 EOF
   export E2E_API_KEY=key
-  REGISTER_API="http://obs.example:31881/v1/install/register"
-  GATEWAY_ENDPOINT="gw.example:31318"
+  unset E2E_SITE E2E_REGISTER_API E2E_GATEWAY_ENDPOINT
+  resolve_endpoints
   run preflight
   [ "$status" -eq 0 ]
 }
 
-@test "preflight fails when E2E_REGISTER_API is missing" {
+@test "preflight rejects a gateway carrying a scheme" {
   stub id <<'EOF'
 #!/usr/bin/env bash
 echo "0"
@@ -149,14 +150,13 @@ EOF
 exit 0
 EOF
   export E2E_API_KEY=key
-  REGISTER_API=""
-  GATEWAY_ENDPOINT="gw.example:31318"
+  GATEWAY_ENDPOINT="https://gw.example:31318"
   run preflight
   [ "$status" -ne 0 ]
-  [[ "$output" == *"E2E_REGISTER_API is not set"* ]]
+  [[ "$output" == *"no scheme"* ]]
 }
 
-@test "preflight fails when E2E_GATEWAY_ENDPOINT is missing" {
+@test "preflight rejects a gateway with no port" {
   stub id <<'EOF'
 #!/usr/bin/env bash
 echo "0"
@@ -166,11 +166,71 @@ EOF
 exit 0
 EOF
   export E2E_API_KEY=key
-  REGISTER_API="http://obs.example:31881/v1/install/register"
-  GATEWAY_ENDPOINT=""
+  GATEWAY_ENDPOINT="gw.example"
   run preflight
   [ "$status" -ne 0 ]
-  [[ "$output" == *"E2E_GATEWAY_ENDPOINT is not set"* ]]
+  [[ "$output" == *"must include a port"* ]]
+}
+
+# ── resolve_endpoints ────────────────────────────────────────────────────────
+# Called directly, never through `run`: it sets globals, and `run` would
+# evaluate it in a subshell where those assignments are thrown away.
+
+@test "resolve_endpoints falls back to production with nothing set" {
+  unset E2E_SITE E2E_REGISTER_API E2E_GATEWAY_ENDPOINT
+  resolve_endpoints
+  [ "$SITE" = "obs.e2enetworks.net" ]
+  [ "$REGISTER_API" = "https://obs.e2enetworks.net/v1/install/register" ]
+  [ "$GATEWAY_ENDPOINT" = "obs.e2enetworks.net:31318" ]
+  [ "$GATEWAY_DERIVED" = "yes" ]
+}
+
+@test "resolve_endpoints derives both endpoints from E2E_SITE" {
+  unset E2E_REGISTER_API E2E_GATEWAY_ENDPOINT
+  export E2E_SITE="api-groot.e2enetworks.net"
+  resolve_endpoints
+  [ "$REGISTER_API" = "https://api-groot.e2enetworks.net/v1/install/register" ]
+  [ "$GATEWAY_ENDPOINT" = "api-groot.e2enetworks.net:31318" ]
+  [ "$GATEWAY_DERIVED" = "yes" ]
+}
+
+@test "resolve_endpoints lets E2E_REGISTER_API win over the derived URL" {
+  unset E2E_GATEWAY_ENDPOINT
+  export E2E_SITE="api-groot.e2enetworks.net"
+  export E2E_REGISTER_API="http://10.0.0.5:31881/v1/install/register"
+  resolve_endpoints
+  [ "$REGISTER_API" = "http://10.0.0.5:31881/v1/install/register" ]
+  # The site still drives the endpoint that was not overridden.
+  [ "$GATEWAY_ENDPOINT" = "api-groot.e2enetworks.net:31318" ]
+}
+
+@test "resolve_endpoints marks an explicit gateway as not derived" {
+  unset E2E_SITE E2E_REGISTER_API
+  export E2E_GATEWAY_ENDPOINT="10.0.0.5:31318"
+  resolve_endpoints
+  [ "$GATEWAY_ENDPOINT" = "10.0.0.5:31318" ]
+  # Drives check_gateway: a guessed endpoint is fatal, a supplied one warns.
+  [ "$GATEWAY_DERIVED" = "no" ]
+}
+
+# ── gateway_reachable ────────────────────────────────────────────────────────
+
+@test "gateway_reachable reports reachable when timeout is unavailable" {
+  # Not being able to run the check is not evidence of an unreachable gateway,
+  # so it must not fail an install on a host without coreutils' timeout.
+  run bash -c '
+    source "'"${REPO_ROOT}"'/install.sh"
+    command() { if [ "$2" = "timeout" ]; then return 1; fi; builtin command "$@"; }
+    gateway_reachable "gw.example:31318"
+  '
+  [ "$status" -eq 0 ]
+}
+
+@test "gateway_reachable fails on a closed port" {
+  # Port 1 on the loopback interface: nothing listens, and the connection is
+  # refused immediately rather than hanging until the 5s timeout.
+  run gateway_reachable "127.0.0.1:1"
+  [ "$status" -ne 0 ]
 }
 
 # ── checksum verification ────────────────────────────────────────────────────

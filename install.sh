@@ -2,8 +2,11 @@
 # E2E Observability Agent — VM installer
 # Usage:
 #   E2E_API_KEY=<key> \
-#   E2E_REGISTER_API=http://<obs-api-host>:31881/v1/install/register \
-#   E2E_GATEWAY_ENDPOINT=<gateway-host>:31318 \
+#     bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
+#
+# That installs against production. To install against a dev stack, add E2E_SITE
+# — see the Endpoints block below for that and the per-endpoint overrides:
+#   E2E_API_KEY=<key> E2E_SITE=api-groot.e2enetworks.net \
 #     bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 
 set -euo pipefail
@@ -21,37 +24,58 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 PAGES_BASE="https://e2enetworks-oss.github.io/otel-collector"
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
-# Both are deployment-specific and have no safe default — set them for your
-# environment, or pass them as env vars at install time.
+# E2E_API_KEY is the only value a customer supplies; everything below defaults
+# to production. The overrides exist for engineers installing against one of the
+# dev deployments, and each is narrower than the one before it:
 #
-# E2E_REGISTER_API   The observability-api REST service. Serves
+# E2E_SITE           The deployment to install against — hostname only, no
+#                    scheme and no port. Both endpoints derive from it, so this
+#                    is the single knob a dev environment normally needs.
+#                    Default: production. Example: api-groot.e2enetworks.net
+#
+# E2E_REGISTER_API   Full register URL, for a deployment that does not follow
+#                    the derived shape — a NodePort, say. Serves
 #                    POST /v1/install/register, which exchanges the API key for
-#                    an ingestion token, project_id, and log_group.
-#                    Deployed as the `rest` port of the observability-api
-#                    Service (NodePort 31881 in the reference deployment).
-#                    Example: http://<obs-api-host>:31881/v1/install/register
+#                    an ingestion token, project_id, and log_group (the `rest`
+#                    port of the observability-api Service, NodePort 31881 in
+#                    the reference deployment).
+#                    Example: http://10.0.0.5:31881/v1/install/register
 #
 # E2E_GATEWAY_ENDPOINT
-#                    The otel-gateway OTLP/gRPC listener that the agent ships
-#                    telemetry to. Host:port only — no scheme, no path.
-#                    Port 4317 on the Service (NodePort 31318 in the reference
-#                    deployment).
-#                    Example: <gateway-host>:31318
-REGISTER_API="${E2E_REGISTER_API:-}"
-GATEWAY_ENDPOINT="${E2E_GATEWAY_ENDPOINT:-}"
+#                    The otel-gateway OTLP/gRPC listener the agent ships
+#                    telemetry to. Host:port only — no scheme, no path. Port
+#                    4317 on the Service, NodePort 31318 in the reference
+#                    deployment. Example: 10.0.0.5:31318
+#
+# Shaped after Datadog's DD_SITE: one variable selects the environment, and the
+# per-endpoint variables stay as escape hatches for what it cannot express.
+DEFAULT_SITE="obs.e2enetworks.net"
+GATEWAY_PORT="31318"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 info()  { echo "[e2e-install] $*"; }
 error() { echo "[e2e-install] ERROR: $*" >&2; exit 1; }
 
-# Every network call goes through these. Without a timeout, a VM with a
-# half-open route hangs forever and the install neither finishes nor fails;
-# without retries a single blip on a customer network fails a good install.
-# No --proto-redir here on purpose: E2E_REGISTER_API is documented as http for
-# the NodePort deployment, so pinning redirects to https would break it.
+# Bounds for the small control-plane calls — register, checksums.txt, the
+# collector config. Each is a few KB, so a 120s ceiling on the whole request is
+# generous, and it catches the half-open route that otherwise hangs an install
+# forever with no error. Retries cover a single blip on a customer network.
+# No --proto-redir on purpose: E2E_REGISTER_API is documented as http for the
+# NodePort deployment, so pinning redirects to https would break it.
 CURL_OPTS=(--fail --silent --show-error --location
            --connect-timeout 10 --max-time 120
            --retry 3 --retry-delay 2 --retry-connrefused)
+
+# The binary is ~210 MB and deliberately gets NO --max-time: a 120s ceiling
+# aborts every install on a link slower than ~15 Mbit/s, then burns three
+# retries doing it again. A stalled transfer is caught by throughput instead —
+# give up only when less than 1 KB/s moves for 60s, which bounds a hang without
+# punishing a slow but working link. --silent is dropped so --progress-bar can
+# actually render; curl suppresses the bar entirely under --silent.
+CURL_DOWNLOAD_OPTS=(--fail --show-error --location --progress-bar
+                    --connect-timeout 10
+                    --speed-limit 1024 --speed-time 60
+                    --retry 3 --retry-delay 2 --retry-connrefused)
 
 # Temp downloads are removed on every exit path, so a failed install never
 # leaves a partial binary behind in a directory on PATH.
@@ -61,7 +85,38 @@ trap cleanup EXIT
 
 # ── Pure functions (unit-testable via bats) ──────────────────────────────────
 
-# preflight: verify root, required tools, and required env vars.
+# resolve_endpoints: fill SITE, REGISTER_API, GATEWAY_ENDPOINT and
+# GATEWAY_DERIVED from the environment. Precedence runs narrowest first — an
+# explicit per-endpoint override, then E2E_SITE, then production. Sets globals
+# rather than echoing because it resolves four values; bats drives it with an
+# environment and reads them back.
+resolve_endpoints() {
+  SITE="${E2E_SITE:-${DEFAULT_SITE}}"
+  REGISTER_API="${E2E_REGISTER_API:-https://${SITE}/v1/install/register}"
+  GATEWAY_ENDPOINT="${E2E_GATEWAY_ENDPOINT:-${SITE}:${GATEWAY_PORT}}"
+
+  # Whether the gateway was derived or supplied decides how hard we check it
+  # below: a value the operator typed is their claim to make, a value this
+  # script guessed has to prove itself before we ship telemetry at it.
+  if [ -n "${E2E_GATEWAY_ENDPOINT:-}" ]; then
+    GATEWAY_DERIVED="no"
+  else
+    GATEWAY_DERIVED="yes"
+  fi
+}
+
+# gateway_reachable <host:port>: succeed when a TCP connection opens inside 5s.
+# Returns 0 when the check cannot run at all (no `timeout`), because an absent
+# tool is not evidence of an unreachable gateway.
+gateway_reachable() {
+  local hostport="$1" host port
+  host="${hostport%:*}"
+  port="${hostport##*:}"
+  command -v timeout >/dev/null 2>&1 || return 0
+  timeout 5 bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null
+}
+
+# preflight: verify root, required tools, the API key, and endpoint shape.
 preflight() {
   [ "$(id -u)" -eq 0 ] || error "This script must be run as root (use sudo or run as root)."
   command -v curl      >/dev/null 2>&1 || error "curl is required but not installed."
@@ -69,13 +124,38 @@ preflight() {
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || \
     error "Neither sha256sum nor shasum found — the downloaded binary could not be verified."
 
+  # The only value with no default. Everything else falls back to production.
   [ -n "${E2E_API_KEY:-}" ] || error "E2E_API_KEY is not set."
 
-  # Endpoints are deployment-specific — fail loudly rather than guessing.
-  [ -n "${REGISTER_API:-}" ] || error \
-    "E2E_REGISTER_API is not set. Point it at the observability-api register endpoint, e.g. http://<obs-api-host>:31881/v1/install/register"
-  [ -n "${GATEWAY_ENDPOINT:-}" ] || error \
-    "E2E_GATEWAY_ENDPOINT is not set. Point it at the otel-gateway OTLP/gRPC listener as host:port, e.g. <gateway-host>:31318"
+  # A scheme on the gateway is the common mistake: it is an OTLP/gRPC dial
+  # target, not a URL, and the collector fails obscurely later if one leaks in.
+  case "${GATEWAY_ENDPOINT}" in
+    *://*) error "E2E_GATEWAY_ENDPOINT must be host:port with no scheme (got '${GATEWAY_ENDPOINT}')." ;;
+    *:*)   : ;;
+    *)     error "E2E_GATEWAY_ENDPOINT must include a port, as host:port (got '${GATEWAY_ENDPOINT}')." ;;
+  esac
+}
+
+# check_gateway: an unreachable gateway does not stop the collector — the
+# service stays active, retries each batch for five minutes and then drops it,
+# so the only symptom is missing data. Refuse to finish an install that would
+# land in that state on an endpoint nobody chose. An endpoint the operator
+# passed explicitly only warns: their network may open after install.
+check_gateway() {
+  info "Checking the gateway is reachable (${GATEWAY_ENDPOINT})..."
+  if gateway_reachable "${GATEWAY_ENDPOINT}"; then
+    info "Gateway reachable."
+    return 0
+  fi
+  if [ "${GATEWAY_DERIVED}" = "yes" ]; then
+    error "Cannot reach the default gateway ${GATEWAY_ENDPOINT}. This host may be \
+outside the E2E internal network, or this deployment may use a different gateway. \
+Set E2E_SITE for your environment, or E2E_GATEWAY_ENDPOINT=<host>:<port> for the \
+gateway directly, then re-run. Installing now would collect telemetry and drop it."
+  fi
+  info "WARNING: ${GATEWAY_ENDPOINT} is not reachable from this host right now. \
+Continuing because you set it explicitly — until it opens, the agent collects \
+and drops telemetry with no error beyond the service journal."
 }
 
 # sha256_of <file>: echo the file's sha256, using whichever tool the distro ships.
@@ -137,8 +217,10 @@ parse_field() {
 main() {
   # Phase 0: Preflight
   info "Running preflight checks..."
+  resolve_endpoints
   preflight
-  info "Preflight passed."
+  info "Preflight passed. Site: ${SITE}"
+  check_gateway
 
   # Phase 1: Detect platform
   info "Detecting platform..."
@@ -183,7 +265,7 @@ main() {
 
   mkdir -p "$(dirname "${BINARY_PATH}")"
 
-  curl "${CURL_OPTS[@]}" --progress-bar -o "${binary_tmp}" "${binary_url}" || \
+  curl "${CURL_DOWNLOAD_OPTS[@]}" -o "${binary_tmp}" "${binary_url}" || \
     error "Binary download failed from ${binary_url}. Please try again or contact E2E support."
 
   info "Verifying the download against the published checksum..."
