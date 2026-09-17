@@ -44,6 +44,21 @@ GATEWAY_ENDPOINT="${E2E_GATEWAY_ENDPOINT:-}"
 info()  { echo "[e2e-install] $*"; }
 error() { echo "[e2e-install] ERROR: $*" >&2; exit 1; }
 
+# Every network call goes through these. Without a timeout, a VM with a
+# half-open route hangs forever and the install neither finishes nor fails;
+# without retries a single blip on a customer network fails a good install.
+# No --proto-redir here on purpose: E2E_REGISTER_API is documented as http for
+# the NodePort deployment, so pinning redirects to https would break it.
+CURL_OPTS=(--fail --silent --show-error --location
+           --connect-timeout 10 --max-time 120
+           --retry 3 --retry-delay 2 --retry-connrefused)
+
+# Temp downloads are removed on every exit path, so a failed install never
+# leaves a partial binary behind in a directory on PATH.
+TMP_FILES=()
+cleanup() { [ ${#TMP_FILES[@]} -eq 0 ] || rm -f "${TMP_FILES[@]}"; }
+trap cleanup EXIT
+
 # ── Pure functions (unit-testable via bats) ──────────────────────────────────
 
 # preflight: verify root, required tools, and required env vars.
@@ -51,6 +66,8 @@ preflight() {
   [ "$(id -u)" -eq 0 ] || error "This script must be run as root (use sudo or run as root)."
   command -v curl      >/dev/null 2>&1 || error "curl is required but not installed."
   command -v systemctl >/dev/null 2>&1 || error "systemctl not found — this installer requires a systemd-based OS."
+  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || \
+    error "Neither sha256sum nor shasum found — the downloaded binary could not be verified."
 
   [ -n "${E2E_API_KEY:-}" ] || error "E2E_API_KEY is not set."
 
@@ -59,6 +76,35 @@ preflight() {
     "E2E_REGISTER_API is not set. Point it at the observability-api register endpoint, e.g. http://<obs-api-host>:31881/v1/install/register"
   [ -n "${GATEWAY_ENDPOINT:-}" ] || error \
     "E2E_GATEWAY_ENDPOINT is not set. Point it at the otel-gateway OTLP/gRPC listener as host:port, e.g. <gateway-host>:31318"
+}
+
+# sha256_of <file>: echo the file's sha256, using whichever tool the distro ships.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+# checksum_for <checksums-text> <filename>: echo the published sha256 for that
+# file, or nothing when it is not listed. Pure, so bats covers the parsing.
+checksum_for() {
+  echo "$1" | awk -v n="$2" '$2 == n { print $1; exit }'
+}
+
+# verify_binary <file> <published-name>: refuse to install anything whose digest
+# does not match the published one. Fails closed on purpose — an unreachable or
+# incomplete checksums file is a refusal, never a silent unverified install.
+verify_binary() {
+  local file="$1" name="$2" sums expected actual
+  sums=$(curl "${CURL_OPTS[@]}" "${PAGES_BASE}/checksums.txt") \
+    || error "Could not fetch ${PAGES_BASE}/checksums.txt. Refusing to install an unverified binary."
+  expected=$(checksum_for "${sums}" "${name}")
+  [ -n "${expected}" ] || error "No published checksum for ${name}. Refusing to install an unverified binary."
+  actual=$(sha256_of "${file}")
+  [ "${actual}" = "${expected}" ] || \
+    error "Checksum mismatch for ${name}. Expected ${expected}, got ${actual}. Refusing to install."
 }
 
 # detect_arch: map `uname -m` to the Go arch string. Echoes amd64|arm64, or
@@ -111,7 +157,7 @@ main() {
 
   # Phase 2: Register with E2E Observability API
   info "Registering with E2E Observability API (host: ${host_name})..."
-  REGISTER_RESPONSE=$(curl -fsSL -X POST "${REGISTER_API}" \
+  REGISTER_RESPONSE=$(curl "${CURL_OPTS[@]}" -X POST "${REGISTER_API}" \
     -H "Content-Type: application/json" \
     -d "{
       \"apiKey\":       \"${E2E_API_KEY}\",
@@ -133,11 +179,15 @@ main() {
   info "Downloading E2E OTel Collector binary (linux/${ARCH})..."
   local binary_url="${PAGES_BASE}/e2e-otel-collector-linux-${ARCH}"
   local binary_tmp="${BINARY_PATH}.tmp"
+  TMP_FILES+=("${binary_tmp}")
 
   mkdir -p "$(dirname "${BINARY_PATH}")"
 
-  curl -fsSL --progress-bar -o "${binary_tmp}" "${binary_url}" || \
+  curl "${CURL_OPTS[@]}" --progress-bar -o "${binary_tmp}" "${binary_url}" || \
     error "Binary download failed from ${binary_url}. Please try again or contact E2E support."
+
+  info "Verifying the download against the published checksum..."
+  verify_binary "${binary_tmp}" "e2e-otel-collector-linux-${ARCH}"
 
   chmod +x "${binary_tmp}"
   mv "${binary_tmp}" "${BINARY_PATH}"
@@ -162,7 +212,7 @@ EOF
 
   # 4b. Collector config (fetched from GitHub Pages)
   info "Fetching collector config..."
-  curl -fsSL -o "${CONFIG_DIR}/config.yaml" "${PAGES_BASE}/samples/vm-config.yaml" || \
+  curl "${CURL_OPTS[@]}" -o "${CONFIG_DIR}/config.yaml" "${PAGES_BASE}/samples/vm-config.yaml" || \
     error "Failed to download vm-config.yaml from ${PAGES_BASE}/samples/vm-config.yaml."
   chmod 644 "${CONFIG_DIR}/config.yaml"
 

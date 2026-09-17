@@ -143,6 +143,10 @@ E2E_GATEWAY_ENDPOINT=<gateway-host>:31318 \
 | `E2E_REGISTER_API` | `observability-api` register endpoint — the `rest` port of the `observability-api` Service (NodePort **31881** in the reference deployment). Full URL including `/v1/install/register`. | Ask your observability admin |
 | `E2E_GATEWAY_ENDPOINT` | `otel-gateway` OTLP/gRPC listener as `host:port` — no scheme, no path. Port 4317 on the Service (NodePort **31318** in the reference deployment). | Ask your observability admin |
 
+The installer verifies the binary it downloaded against the published
+`checksums.txt` before running it, and refuses to install on a mismatch or when
+the checksum cannot be fetched. A failed install leaves no partial binary behind.
+
 The two endpoints are deployment-specific and have **no defaults** — the
 installer's preflight fails with an explicit message if either is unset, rather
 than guessing at an address. `E2E_GATEWAY_ENDPOINT` is written into
