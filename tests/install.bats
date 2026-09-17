@@ -238,19 +238,50 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY E2E_REGISTER_API E2E_G
 
 # ── posthog_capture ──────────────────────────────────────────────────────────
 
-@test "posthog_capture is a no-op when no key is configured" {
-  unset E2E_POSTHOG_KEY
-  # A curl stub that fails loudly proves the function never reached the network.
-  stub curl <<'EOF'
+# A curl stub that leaves a marker file. posthog_capture redirects curl's stdout
+# and stderr to /dev/null, so anything the stub PRINTS is invisible to the test —
+# the marker is the only reliable evidence that the network was reached.
+CURL_MARKER=""
+loud_curl() {
+  CURL_MARKER="${STUB_DIR}/curl-was-called"
+  stub curl <<EOF
 #!/usr/bin/env bash
-echo "curl was called"; exit 1
+touch "${CURL_MARKER}"
+exit 1
 EOF
+}
+
+@test "posthog_capture is a no-op when no key is configured" {
+  export E2E_TELEMETRY=1
+  unset E2E_POSTHOG_KEY
+  loud_curl
   run posthog_capture "vm_agent_installed" '"arch":"amd64"'
   [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ ! -f "$CURL_MARKER" ]
+}
+
+@test "posthog_capture sends nothing without opt-in, even with a key set" {
+  # The default. A customer who never set E2E_TELEMETRY sends nothing, whatever
+  # key the published script happens to ship with.
+  unset E2E_TELEMETRY
+  export E2E_POSTHOG_KEY="phc_test"
+  loud_curl
+  run posthog_capture "vm_agent_installed" '"arch":"amd64"'
+  [ "$status" -eq 0 ]
+  [ ! -f "$CURL_MARKER" ]
+}
+
+@test "telemetry_enabled accepts only affirmative opt-in values" {
+  for v in 1 true yes on; do
+    E2E_TELEMETRY="$v" telemetry_enabled || { echo "rejected affirmative: $v"; return 1; }
+  done
+  for v in "" 0 false no off maybe TRUE; do
+    if E2E_TELEMETRY="$v" telemetry_enabled; then echo "accepted non-affirmative: $v"; return 1; fi
+  done
 }
 
 @test "posthog_capture never fails the install when the endpoint is down" {
+  export E2E_TELEMETRY=1
   export E2E_POSTHOG_KEY="phc_test"
   export E2E_POSTHOG_HOST="http://127.0.0.1:1"
   INSTALL_ID="deadbeef"

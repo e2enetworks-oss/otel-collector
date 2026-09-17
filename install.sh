@@ -184,16 +184,29 @@ Continuing because you set it explicitly — until it opens, the agent collects 
 and drops telemetry with no error beyond the service journal."
 }
 
+# telemetry_enabled: install telemetry is OPT-IN. Silence is a no, so a customer
+# who never heard of E2E_TELEMETRY never sends anything — which is the only
+# reading of consent that survives someone piping this script into a root shell
+# without reading it first. Opting out is not a step they have to find.
+telemetry_enabled() {
+  case "${E2E_TELEMETRY:-}" in
+    1|true|yes|on) return 0 ;;
+    *)             return 1 ;;
+  esac
+}
+
 # posthog_capture <event> <properties-json-fragment>: best-effort install
 # telemetry. Never fails the install — analytics being down is not an install
 # error — and never blocks it for longer than the curl bounds allow.
 #
-# There is no key committed here on purpose. PostHog project keys are designed
-# to be public, but which project, which region, and whether an install event
-# may carry tenant identifiers are decisions for the maintainer, not defaults
-# for a script to pick. Unset means this function does nothing at all.
+# Two independent gates, both required. E2E_TELEMETRY is the customer's consent;
+# E2E_POSTHOG_KEY is the maintainer's. There is no key committed here on purpose:
+# PostHog project keys are designed to be public, but which project, which
+# region, and whether an install event may carry tenant identifiers are calls
+# for the maintainer, not defaults for a script to pick.
 posthog_capture() {
   local event="$1" props="$2"
+  telemetry_enabled || return 0
   [ -n "${E2E_POSTHOG_KEY:-}" ] || return 0
   local host="${E2E_POSTHOG_HOST:-https://app.posthog.com}"
   curl "${CURL_OPTS[@]}" -X POST "${host}/capture/" \
