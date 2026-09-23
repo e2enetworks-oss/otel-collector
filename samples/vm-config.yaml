@@ -11,6 +11,9 @@
 #   E2E_GATEWAY_ENDPOINT
 #                    — otel-gateway OTLP/gRPC listener as host:port
 #                      (e.g. <gateway-host>:31318). No scheme, no path.
+#   E2E_GATEWAY_INSECURE
+#                    — "true" disables TLS to the gateway. Private network only:
+#                      it puts the ingestion token on the wire in cleartext.
 # =============================================================================
 
 extensions:
@@ -91,6 +94,14 @@ receivers:
         field: resource["host.name"]
         value: "${env:HOST_NAME}"
 
+  # ── Local OTLP HTTP — app traces (and any local metrics/logs push) from any
+  # process on this VM, including containers without --network host (bound
+  # to 0.0.0.0, reachable via this VM's routable IP, not just localhost).
+  otlp/local:
+    protocols:
+      http:
+        endpoint: "0.0.0.0:4318"
+
   # ── Host OS metrics ───────────────────────────────────────────────────────
   hostmetrics:
     collection_interval: 30s
@@ -143,9 +154,19 @@ exporters:
   otlp/gateway:
     # otel-gateway OTLP/gRPC listener, as host:port — no scheme, no path.
     # Written to the env file by install.sh from E2E_GATEWAY_ENDPOINT.
+    #
+    # Supplied per install rather than hardcoded. The previous literal was
+    # 172.16.230.168:31318 — an RFC1918 address, so it works only for collectors
+    # inside E2E's private network. An external customer's VM cannot route to it
+    # at all, which makes a hardcoded value a hard blocker for multi-customer.
     endpoint: "${env:E2E_GATEWAY_ENDPOINT}"
     tls:
-      insecure: true
+      # Also per install. `true` sends the Bearer token in CLEARTEXT, which is
+      # tolerable on a private network and must never be used across the public
+      # internet — anyone on the path can lift the token and impersonate the
+      # tenant. The install command sets this explicitly; it defaults to true
+      # only so existing internal installs keep working unchanged.
+      insecure: ${env:E2E_GATEWAY_INSECURE}
     headers:
       authorization: "Bearer ${env:E2E_TOKEN}"
     retry_on_failure:
@@ -158,7 +179,13 @@ service:
   extensions: [health_check, file_storage]
   pipelines:
     metrics/infrastructure:
-      receivers: [hostmetrics]
+      receivers: [hostmetrics, otlp/local]
+      processors: [memory_limiter, resource/node, batch]
+      exporters: [otlp/gateway]
+    # App traces — send OTLP to http://<this-vm-ip>:4318 with the same
+    # E2E_TOKEN this collector uses (see docs/VM_APP_TRACES.md for SDK setup).
+    traces:
+      receivers: [otlp/local]
       processors: [memory_limiter, resource/node, batch]
       exporters: [otlp/gateway]
     logs:
