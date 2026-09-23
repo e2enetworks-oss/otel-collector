@@ -13,13 +13,20 @@ setup() {
   PATH="${STUB_DIR}:${PATH}"
 
   # install.sh runs `set -euo pipefail` at top level. Disable errexit for the
-  # source (otherwise the first non-zero command aborts it), then clear all three
-  # afterward — nounset/pipefail would otherwise leak into every test and make a
-  # future bare-$VAR reference fail confusingly. Tests own error handling via `run`.
+  # source (otherwise the first non-zero command aborts it), then clear nounset
+  # and pipefail afterward — they would otherwise leak into every test and make
+  # a future bare-$VAR reference fail confusingly.
   set +e
   # shellcheck source=/dev/null
   source "${REPO_ROOT}/install.sh"
-  set +euo pipefail
+  set +u +o pipefail
+
+  # errexit MUST go back on. bats decides pass/fail from the test body aborting
+  # on a non-zero command, so leaving it off makes every `[ ... ]` assertion
+  # advisory: the suite then reports "ok" for a test asserting `[ 1 -eq 2 ]`,
+  # and for a preflight that actually errored. Failures via `run` still work —
+  # `run` captures the status instead of letting it abort.
+  set -e
 }
 
 teardown() {
@@ -101,7 +108,8 @@ EOF
   [[ "$output" == *"must be run as root"* ]]
 }
 
-@test "preflight fails when E2E_API_KEY is missing" {
+# root + tooling stubs shared by every preflight credential case.
+stub_root_env() {
   stub id <<'EOF'
 #!/usr/bin/env bash
 echo "0"
@@ -110,22 +118,117 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  unset E2E_API_KEY
-  run preflight
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"E2E_API_KEY is not set"* ]]
+  # curl must be stubbed too: preflight checks for it before it looks at any
+  # credential, and the bats image ships neither curl nor systemctl. Without
+  # this every credential case died on "curl is required" and never reached the
+  # branch it meant to exercise.
+  stub curl <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  unset E2E_API_KEY E2E_TOKEN E2E_PROJECT_ID E2E_LOG_GROUP
+
+  # GATEWAY_ENDPOINT is now required in both modes and has no default. Set the
+  # resolved variable, not E2E_GATEWAY_ENDPOINT: setup() already sourced
+  # install.sh, so the `${E2E_GATEWAY_ENDPOINT:-}` assignment has long since run.
+  GATEWAY_ENDPOINT="gateway.example:31318"
+  GATEWAY_INSECURE="true"
+  REGISTER_API="http://obs.example:31881/v1/install/register"
 }
 
+@test "preflight fails when no credentials at all are supplied" {
+  stub_root_env
+  run preflight
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Neither E2E_TOKEN"* ]]
+}
+
+# ── TIR-provisioned mode ──────────────────────────────────────────────────────
+#
+# The "start observability" button embeds a token minted by the TIR backend.
+# It must arrive COMPLETE: a token without its project or log group installs an
+# agent that ships data it cannot attribute.
+
+@test "preflight passes with a complete TIR-provisioned credential set" {
+  stub_root_env
+  export E2E_TOKEN=tok E2E_PROJECT_ID=1550 E2E_LOG_GROUP=logs.infra.vm.1550
+  run preflight
+  [ "$status" -eq 0 ]
+}
+
+@test "preflight needs no API key when TIR provisioned the token" {
+  # The whole point of the TIR path: no API key ever reaches the host.
+  stub_root_env
+  export E2E_TOKEN=tok E2E_PROJECT_ID=1550 E2E_LOG_GROUP=logs.infra.vm.1550
+  run preflight
+  [ "$status" -eq 0 ]
+  [ -z "${E2E_API_KEY:-}" ]
+}
+
+@test "preflight fails when TIR token arrives without a project" {
+  stub_root_env
+  export E2E_TOKEN=tok E2E_LOG_GROUP=logs.infra.vm.1550
+  run preflight
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"without E2E_PROJECT_ID"* ]]
+}
+
+@test "preflight fails when TIR token arrives without a log group" {
+  stub_root_env
+  export E2E_TOKEN=tok E2E_PROJECT_ID=1550
+  run preflight
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"without E2E_LOG_GROUP"* ]]
+}
+
+# ── Self-registration mode (manual / legacy) ──────────────────────────────────
+
 @test "preflight passes with root, tools, and E2E_API_KEY" {
-  stub id <<'EOF'
-#!/usr/bin/env bash
-echo "0"
-EOF
-  stub systemctl <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
+  stub_root_env
   export E2E_API_KEY=key
+  run preflight
+  [ "$status" -eq 0 ]
+}
+
+# ── Endpoint requirements ─────────────────────────────────────────────────────
+#
+# Neither endpoint has a default any more. The old fallback was
+# 172.16.230.168:31318, an RFC1918 address that silently pointed every external
+# install at a gateway it could not route to.
+
+@test "preflight fails when the gateway endpoint is unset (TIR mode)" {
+  stub_root_env
+  export E2E_TOKEN=tok E2E_PROJECT_ID=1557 E2E_LOG_GROUP=lg
+  GATEWAY_ENDPOINT=""
+  run preflight
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"E2E_GATEWAY_ENDPOINT is not set"* ]]
+}
+
+@test "preflight fails when the gateway endpoint is unset (self-registration)" {
+  stub_root_env
+  export E2E_API_KEY=key
+  GATEWAY_ENDPOINT=""
+  run preflight
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"E2E_GATEWAY_ENDPOINT is not set"* ]]
+}
+
+@test "self-registration requires the register endpoint" {
+  stub_root_env
+  export E2E_API_KEY=key
+  REGISTER_API=""
+  run preflight
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"E2E_REGISTER_API is not set"* ]]
+}
+
+@test "TIR-provisioned mode does NOT require the register endpoint" {
+  # TIR already registered; requiring the address here would break every
+  # install that goes through the console button.
+  stub_root_env
+  export E2E_TOKEN=tok E2E_PROJECT_ID=1557 E2E_LOG_GROUP=lg
+  REGISTER_API=""
   run preflight
   [ "$status" -eq 0 ]
 }
