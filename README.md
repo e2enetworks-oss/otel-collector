@@ -19,9 +19,7 @@ E2E_PERSONAL_ACCESS_TOKEN=<your-personal-access-token> \
   bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 ```
 
-Root, systemd, `curl`, and a Linux VM on amd64 or arm64. Your personal access token is the only required value. The installer sends the detected hostname to the Signals API and receives a separate ingestion token, project ID, and log group. If the API returns `agent_id`, the installer shows that collector agent ID and saves it locally. The personal access token is not written to the collector's env file.
-
-Full operator guide, including verification and uninstall: [Install the Virtual Machine Collector](https://runbooks.e2enetworks.net/observability/agents/vm/install) (internal).
+Root, systemd, `curl`, and a Linux VM on amd64 or arm64. Your personal access token is the only required value. The installer sends the detected hostname to the Signals API. Registration must return a collector `agent_id`, ingestion token, project ID, and log group. The installer shows and saves the agent ID; the personal access token is not written to the collector's env file.
 
 ### Pointing at a different deployment
 
@@ -30,7 +28,7 @@ Engineers installing against a dev stack can select its API origin and gateway:
 | Variable | Default | Use when |
 |---|---|---|
 | `E2E_PERSONAL_ACCESS_TOKEN` | — **required** | Always. From MyAccount → API IAM. |
-| `E2E_API` | `https://api.e2enetworks.com` | API origin. A bare host uses HTTPS; use `http://host:port` for an internal NodePort. The installer appends `/v1/install/register`. |
+| `E2E_API` | `https://api.e2enetworks.com` | API origin. A bare host uses HTTPS; use `http://host:port` for an internal NodePort. The installer appends `/api/v1/gpu/signals/agents`. |
 | `E2E_INTERNAL_GATEWAY` | `signals.e2enetworks.net` | Signals go somewhere other than production. Hostname, or `host:port` when it is not on `4317`. |
 
 ```bash
@@ -47,7 +45,7 @@ It also verifies the downloaded binary against the published `checksums.txt` and
 
 Re-running the installer on the same VM rewrites the config, env file and unit. The Signals API must keep registration idempotent for the same personal access token and hostname so reruns keep the same collector agent ID.
 
-Install output shows each phase as `STEP`, `PASS`, `WARN`, or `FAIL`, with colors on interactive terminals. It stays plain when piped or when `NO_COLOR` is set. Registration warns if the API omits `agent_id`; service `PASS` means systemd reports it active, not that telemetry has reached the gateway.
+Install output shows each phase as `STEP`, `PASS`, `WARN`, or `FAIL`, with colors on interactive terminals. It stays plain when piped or when `NO_COLOR` is set. Registration fails if the API omits `agent_id`; service `PASS` means systemd reports it active, not that telemetry has reached the gateway.
 
 ---
 

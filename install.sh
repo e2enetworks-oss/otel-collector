@@ -46,14 +46,8 @@ DEFAULT_GATEWAY="signals.e2enetworks.net"
 # 31318 is only its NodePort, so a hostname fronting a load balancer lands here.
 DEFAULT_GATEWAY_PORT="4317"
 
-# Path the API serves agent registration on.
-#
-# TARGET: /v1/signals/agents. The current route is the one that is live today —
-# pointing at the target before the observability-api ships it would 404 every
-# install. Moving over is this one line plus its test, once that route exists.
-# See docs/REST_API_DESIGN_GUIDELINES.md §1 for why it is a plural noun and not
-# /signals/register: "register" is a verb, and enrolment creates an agent.
-REGISTER_PATH="/v1/install/register"
+# The Signals API creates a collector agent and returns its agent_id here.
+REGISTER_PATH="/api/v1/gpu/signals/agents"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 COLOR_BLUE='' COLOR_GREEN='' COLOR_YELLOW='' COLOR_RED='' COLOR_RESET=''
@@ -349,21 +343,15 @@ register_collector() {
   E2E_LOG_GROUP=$(parse_field "${register_response}" "log_group")
   E2E_PROJECT_ID=$(parse_field "${register_response}" "project_id")
   E2E_AGENT_ID=$(parse_field "${register_response}" "agent_id")
-  # Not asserted below: neither field is served by the current route. customer_id
-  # lands when the API returns it, gateway_endpoint lets the API decide where a
-  # tenant's signals go instead of this script assuming it.
+  # These fields are optional until the Signals API includes them in its reply.
   E2E_CUSTOMER_ID=$(parse_field "${register_response}" "customer_id")
   served_gateway=$(parse_field "${register_response}" "gateway_endpoint")
 
   [ -n "${E2E_TOKEN:-}"     ] || error "Registration failed: ingestion_token missing. Check your credentials."
   [ -n "${E2E_LOG_GROUP:-}" ] || error "Registration failed: log_group missing. Check your credentials."
   [ -n "${E2E_PROJECT_ID:-}" ] || error "Registration failed: project_id missing. Check your credentials."
-
-  if [ -n "${E2E_AGENT_ID}" ]; then
-    success "Signals API registered collector agent ${E2E_AGENT_ID}."
-  else
-    warn "Signals API returned credentials without agent_id; the agent record cannot be confirmed."
-  fi
+  [ -n "${E2E_AGENT_ID:-}" ] || error "Registration failed: agent_id missing from Signals API response."
+  success "Signals API registered collector agent ${E2E_AGENT_ID}."
 
   # An endpoint the API named beats anything this script defaulted to: it knows
   # which gateway serves this tenant, and it is authoritative per environment.
@@ -474,7 +462,7 @@ finish_install() {
   echo " E2E Observability Agent installed; service is active."
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo " Host:      ${HOST_NAME}"
-  echo " Agent ID:  ${E2E_AGENT_ID:-not returned by Signals API}"
+  echo " Agent ID:  ${E2E_AGENT_ID}"
   echo " Log group: ${E2E_LOG_GROUP}"
   echo " Project:   ${E2E_PROJECT_ID}"
   echo ""

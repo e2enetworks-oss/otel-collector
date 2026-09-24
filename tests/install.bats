@@ -128,7 +128,7 @@ EOF
   [ "$E2E_TOKEN" = "ingest-123" ]
 }
 
-@test "register_collector warns when the Signals API omits agent_id" {
+@test "register_collector fails when the Signals API omits agent_id" {
   export E2E_PERSONAL_ACCESS_TOKEN="pat-test"
   export E2E_INTERNAL_GATEWAY="gw.example:4317"
   unset E2E_API
@@ -140,8 +140,8 @@ printf '{"ingestion_token":"ingest-123","project_id":"project-123","log_group":"
 EOF
   gateway_reachable() { return 0; }
   run register_collector
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"WARN Signals API returned credentials without agent_id"* ]]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FAIL Registration failed: agent_id missing"* ]]
 }
 
 # ── preflight ─────────────────────────────────────────────────────────────────
@@ -232,7 +232,7 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
   clear_endpoint_env
   resolve_endpoints
   [ "$API_BASE_URL" = "https://api.e2enetworks.com" ]
-  [ "$REGISTER_URL" = "https://api.e2enetworks.com/v1/install/register" ]
+  [ "$REGISTER_URL" = "https://api.e2enetworks.com/api/v1/gpu/signals/agents" ]
   [ "$INTERNAL_GATEWAY" = "signals.e2enetworks.net:4317" ]
   [ "$GATEWAY_DEFAULTED" = "yes" ]
 }
@@ -241,7 +241,7 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
   clear_endpoint_env
   export E2E_API="api-groot.e2enetworks.net"
   resolve_endpoints
-  [ "$REGISTER_URL" = "https://api-groot.e2enetworks.net/v1/install/register" ]
+  [ "$REGISTER_URL" = "https://api-groot.e2enetworks.net/api/v1/gpu/signals/agents" ]
   # E2E_API selects the API only. The gateway has its own variable.
   [ "$INTERNAL_GATEWAY" = "signals.e2enetworks.net:4317" ]
 }
@@ -251,7 +251,7 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
   export E2E_API="http://10.0.0.5:31881/"
   resolve_endpoints
   [ "$API_BASE_URL" = "http://10.0.0.5:31881" ]
-  [ "$REGISTER_URL" = "http://10.0.0.5:31881/v1/install/register" ]
+  [ "$REGISTER_URL" = "http://10.0.0.5:31881/api/v1/gpu/signals/agents" ]
 }
 
 @test "resolve_endpoints rejects an E2E_API containing a path" {
