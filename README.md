@@ -95,8 +95,6 @@ make changelog VERSION=x.y.z   # prepend a CHANGELOG entry from git log since th
 
 CI runs `make lint` then `make test` on every push and PR; gitleaks scans separately.
 
-`install.sh`'s testable logic — `resolve_endpoints`, `normalize_gateway`, `preflight`, `detect_arch`, `parse_field`, `checksum_for`, `gateway_reachable`, `posthog_capture` — is written as pure functions behind a `BASH_SOURCE` guard, so the bats suite sources the script without running the installer.
-
 ### Install telemetry
 
 The installer posts a `vm_agent_installed` event to PostHog after the service starts, carrying architecture, distribution, API host, gateway and binary name, keyed by a SHA-256 of the hostname. It is best-effort and never fails an install.
