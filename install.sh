@@ -84,6 +84,11 @@ CURL_OPTS=(--fail --silent --show-error --location
            --connect-timeout 10 --max-time 120
            --retry 3 --retry-delay 2 --retry-connrefused)
 
+# Registration creates an agent. Do not automatically repeat a POST unless the
+# Signals API has a confirmed idempotency contract.
+CURL_REGISTER_OPTS=(--fail --silent --show-error
+                    --connect-timeout 10 --max-time 120)
+
 # The binary is ~210 MB and deliberately gets NO --max-time: a 120s ceiling
 # aborts every install on a link slower than ~15 Mbit/s, then burns three
 # retries doing it again. A stalled transfer is caught by throughput instead —
@@ -98,8 +103,40 @@ CURL_DOWNLOAD_OPTS=(--fail --show-error --location --progress-bar
 # Temp downloads are removed on every exit path, so a failed install never
 # leaves a partial binary behind in a directory on PATH.
 TMP_FILES=()
-cleanup() { [ ${#TMP_FILES[@]} -eq 0 ] || rm -f "${TMP_FILES[@]}"; }
+TMP_DIRS=()
+cleanup() {
+  if [ ${#TMP_FILES[@]} -gt 0 ]; then rm -f "${TMP_FILES[@]}"; fi
+  local dir
+  for dir in "${TMP_DIRS[@]}"; do rmdir "$dir" 2>/dev/null || true; done
+}
 trap cleanup EXIT
+
+JQ_BIN=""
+ensure_jq() {
+  if command -v jq >/dev/null 2>&1 && jq -n 'env' >/dev/null 2>&1; then
+    JQ_BIN=$(command -v jq)
+    return 0
+  fi
+
+  step "Downloading JSON parser"
+  local jq_dir expected actual
+  case "$ARCH" in
+    amd64) expected="b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f" ;;
+    arm64) expected="8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309" ;;
+    *) error "No JSON parser download for linux/${ARCH}." ;;
+  esac
+  jq_dir=$(mktemp -d)
+  TMP_DIRS+=("$jq_dir")
+  JQ_BIN="${jq_dir}/jq"
+  TMP_FILES+=("$JQ_BIN")
+  curl "${CURL_OPTS[@]}" -o "$JQ_BIN" \
+    "https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-${ARCH}" || \
+    error "Could not download jq for linux/${ARCH}."
+  actual=$(sha256_of "$JQ_BIN")
+  [ "$actual" = "$expected" ] || error "Downloaded jq checksum did not match."
+  chmod 700 "$JQ_BIN"
+  success "JSON parser ready."
+}
 
 # ── Pure functions (unit-testable via bats) ──────────────────────────────────
 
@@ -127,6 +164,8 @@ resolve_endpoints() {
   case "$authority" in
     ''|*/*|*\?*|*\#*|*@*) error "E2E_API must be an API origin (scheme, host and optional port), with no path or credentials." ;;
   esac
+  [[ "$authority" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*(:[0-9]{1,5})?$ ]] || \
+    error "E2E_API must contain a hostname and optional numeric port."
   REGISTER_URL="${API_BASE_URL}${REGISTER_PATH}"
   INTERNAL_GATEWAY="$(normalize_gateway "${E2E_INTERNAL_GATEWAY:-${DEFAULT_GATEWAY}}")"
 
@@ -141,14 +180,12 @@ resolve_endpoints() {
   fi
 }
 
-# gateway_reachable <host:port>: succeed when a TCP connection opens inside 5s.
-# Returns 0 when the check cannot run at all (no `timeout`), because an absent
-# tool is not evidence of an unreachable gateway.
+# gateway_reachable <host:port>: 0 if reachable, 2 if the check is unavailable.
 gateway_reachable() {
   local hostport="$1" host port
   host="${hostport%:*}"
   port="${hostport##*:}"
-  command -v timeout >/dev/null 2>&1 || return 0
+  command -v timeout >/dev/null 2>&1 || return 2
   # Positional arguments are expanded by the child Bash, never parsed as code.
   # shellcheck disable=SC2016
   timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$host" "$port" 2>/dev/null
@@ -157,6 +194,7 @@ gateway_reachable() {
 # Check the final gateway too: the Signals API may have supplied it after the
 # initial preflight, and a URL here would make the collector fail at startup.
 validate_gateway() {
+  local host port
   # A scheme on the gateway is the common mistake: it is an OTLP/gRPC dial
   # target, not a URL, and the collector fails obscurely later if one leaks in.
   case "${INTERNAL_GATEWAY}" in
@@ -164,6 +202,14 @@ validate_gateway() {
     *:*)   : ;;
     *)     error "E2E_INTERNAL_GATEWAY must include a port, as host:port (got '${INTERNAL_GATEWAY}')." ;;
   esac
+  host="${INTERNAL_GATEWAY%:*}"
+  port="${INTERNAL_GATEWAY##*:}"
+  [[ "$host" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || \
+    error "E2E_INTERNAL_GATEWAY must contain a valid hostname or IPv4 address."
+  if ! [[ "$port" =~ ^[0-9]{1,5}$ ]] ||
+     ! (( 10#$port >= 1 && 10#$port <= 65535 )); then
+    error "E2E_INTERNAL_GATEWAY must use a numeric port from 1 to 65535."
+  fi
 }
 
 # preflight: verify root, required tools, the personal access token, and gateway.
@@ -171,6 +217,7 @@ preflight() {
   [ "$(id -u)" -eq 0 ] || error "This script must be run as root (use sudo or run as root)."
   command -v curl      >/dev/null 2>&1 || error "curl is required but not installed."
   command -v systemctl >/dev/null 2>&1 || error "systemctl not found — this installer requires a systemd-based OS."
+  command -v mktemp   >/dev/null 2>&1 || error "mktemp is required for safe file updates."
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || \
     error "Neither sha256sum nor shasum found — the downloaded binary could not be verified."
 
@@ -184,9 +231,16 @@ preflight() {
 # land in that state on an endpoint nobody chose. An endpoint the operator
 # passed explicitly only warns: their network may open after install.
 check_gateway() {
+  local check_status
   step "Checking gateway ${INTERNAL_GATEWAY}"
   if gateway_reachable "${INTERNAL_GATEWAY}"; then
     success "Gateway reachable."
+    return 0
+  else
+    check_status=$?
+  fi
+  if [ "$check_status" -eq 2 ]; then
+    warn "Could not check gateway reachability because timeout is not installed."
     return 0
   fi
   if [ "${GATEWAY_DEFAULTED}" = "yes" ]; then
@@ -213,38 +267,6 @@ choose_gateway() {
        [ "${API_BASE_URL}" != "https://${DEFAULT_API}" ]; then
     error "The Signals API did not return a gateway for ${API_BASE_URL}. Set E2E_INTERNAL_GATEWAY for this deployment."
   fi
-}
-
-# telemetry_enabled: install telemetry is OPT-IN. Silence is a no, so a customer
-# who never heard of E2E_TELEMETRY never sends anything — which is the only
-# reading of consent that survives someone piping this script into a root shell
-# without reading it first. Opting out is not a step they have to find.
-telemetry_enabled() {
-  case "${E2E_TELEMETRY:-}" in
-    1|true|yes|on) return 0 ;;
-    *)             return 1 ;;
-  esac
-}
-
-# posthog_capture <event> <properties-json-fragment>: best-effort install
-# telemetry. Never fails the install — analytics being down is not an install
-# error — and never blocks it for longer than the curl bounds allow.
-#
-# Two independent gates, both required. E2E_TELEMETRY is the customer's consent;
-# E2E_POSTHOG_KEY is the maintainer's. There is no key committed here on purpose:
-# PostHog project keys are designed to be public, but which project, which
-# region, and whether an install event may carry tenant identifiers are calls
-# for the maintainer, not defaults for a script to pick.
-posthog_capture() {
-  local event="$1" props="$2"
-  telemetry_enabled || return 0
-  [ -n "${E2E_POSTHOG_KEY:-}" ] || return 0
-  local host="${E2E_POSTHOG_HOST:-https://app.posthog.com}"
-  curl "${CURL_OPTS[@]}" -X POST "${host}/capture/" \
-    -H "Content-Type: application/json" \
-    -d "{\"api_key\":\"${E2E_POSTHOG_KEY}\",\"event\":\"${event}\",\
-\"distinct_id\":\"${INSTALL_ID}\",\"properties\":{${props}}}" \
-    >/dev/null 2>&1 || true
 }
 
 # sha256_hex: read stdin, echo its sha256, using whichever tool the distro ships.
@@ -291,16 +313,29 @@ detect_arch() {
   esac
 }
 
-# parse_field <json> <field>: extract a top-level string field from a JSON
-# object. Uses jq when available, falls back to sed otherwise. Echoes the
-# value or an empty string when the field is absent.
+# parse_field <json> <field>: extract a top-level string field. Missing or
+# non-string values are empty; malformed JSON fails instead of being guessed.
 parse_field() {
   local json="$1" field="$2"
-  if command -v jq >/dev/null 2>&1; then
-    echo "$json" | jq -r ".${field} // empty"
-  else
-    # Also accepts normal pretty-printed JSON with spaces around the colon.
-    printf '%s\n' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
+  # jq reads $field from --arg; the shell must not expand it.
+  # shellcheck disable=SC2016
+  printf '%s' "$json" | "$JQ_BIN" -r --arg field "$field" \
+    'if type == "object" then .[$field] | if type == "string" then . else empty end else error("not an object") end' \
+    2>/dev/null
+}
+
+registration_json() {
+  E2E_PERSONAL_ACCESS_TOKEN="$E2E_PERSONAL_ACCESS_TOKEN" HOST_NAME="$HOST_NAME" "$JQ_BIN" -n \
+    '{apiKey: env.E2E_PERSONAL_ACCESS_TOKEN, resourceType: "vm", hostname: env.HOST_NAME}'
+}
+
+# Values from the API become systemd EnvironmentFile entries. Reject characters
+# that could change their meaning or add another entry.
+validate_env_value() {
+  local name="$1" value="$2"
+  if [[ "$value" =~ [[:space:]] ]] || [[ "$value" == *\"* ]] || \
+     [[ "$value" == *\'* ]] || [[ "$value" == *\\* ]]; then
+    error "Registration failed: ${name} contains unsupported characters."
   fi
 }
 
@@ -318,28 +353,24 @@ detect_platform() {
   # safe inside a JSON string; the server re-sanitizes for group naming.
   HOST_NAME=$(hostname -f 2>/dev/null || hostname)
   HOST_NAME=${HOST_NAME//[^a-zA-Z0-9.-]/}
+  [ -n "$HOST_NAME" ] || error "Could not determine a valid hostname for registration."
 
-  # Stable per-host pseudonym for install telemetry. Hashed rather than raw so
-  # the hostname itself does not leave the network by default; swap it for
-  # project_id if attribution to an account is wanted (see posthog_capture).
-  INSTALL_ID=$(printf '%s' "${HOST_NAME}" | sha256_hex)
 }
 
 register_collector() {
   step "Registering collector with the Signals API (host: ${HOST_NAME})"
-  local register_response served_gateway
-  # The Signals API still calls this wire field apiKey. Feed it on stdin so
-  # the token is absent from curl's process arguments; refuse redirects so the
-  # token cannot be forwarded to a different host.
-  register_response=$(printf '%s' "{
-      \"apiKey\":       \"${E2E_PERSONAL_ACCESS_TOKEN}\",
-      \"resourceType\": \"vm\",
-      \"hostname\":     \"${HOST_NAME}\"
-    }" | curl "${CURL_OPTS[@]}" --max-redirs 0 -X POST "${REGISTER_URL}" \
+  local request_json register_response served_gateway
+  # The Signals API calls this wire field apiKey. Keep the token out of
+  # process arguments and encode it as JSON before sending it on stdin.
+  request_json=$(registration_json) || \
+    error "Could not encode the Signals API registration request."
+  register_response=$(printf '%s' "$request_json" |
+    curl "${CURL_REGISTER_OPTS[@]}" -X POST "${REGISTER_URL}" \
       -H "Content-Type: application/json" --data-binary @-) || \
     error "Signals API registration failed. Check E2E_PERSONAL_ACCESS_TOKEN and network connectivity."
 
-  E2E_TOKEN=$(parse_field "${register_response}" "ingestion_token")
+  E2E_TOKEN=$(parse_field "${register_response}" "ingestion_token") || \
+    error "Signals API returned invalid JSON instead of a registration response."
   E2E_LOG_GROUP=$(parse_field "${register_response}" "log_group")
   E2E_PROJECT_ID=$(parse_field "${register_response}" "project_id")
   E2E_AGENT_ID=$(parse_field "${register_response}" "agent_id")
@@ -351,6 +382,11 @@ register_collector() {
   [ -n "${E2E_LOG_GROUP:-}" ] || error "Registration failed: log_group missing. Check your credentials."
   [ -n "${E2E_PROJECT_ID:-}" ] || error "Registration failed: project_id missing. Check your credentials."
   [ -n "${E2E_AGENT_ID:-}" ] || error "Registration failed: agent_id missing from Signals API response."
+  validate_env_value "ingestion_token" "$E2E_TOKEN"
+  validate_env_value "log_group" "$E2E_LOG_GROUP"
+  validate_env_value "project_id" "$E2E_PROJECT_ID"
+  validate_env_value "agent_id" "$E2E_AGENT_ID"
+  validate_env_value "customer_id" "$E2E_CUSTOMER_ID"
   success "Signals API registered collector agent ${E2E_AGENT_ID}."
 
   # An endpoint the API named beats anything this script defaulted to: it knows
@@ -366,10 +402,11 @@ register_collector() {
 install_binary() {
   step "Downloading collector binary (linux/${ARCH})"
   local binary_url="${PAGES_BASE}/e2e-otel-collector-linux-${ARCH}"
-  local binary_tmp="${BINARY_PATH}.tmp"
-  TMP_FILES+=("${binary_tmp}")
+  local binary_tmp
 
   mkdir -p "$(dirname "${BINARY_PATH}")"
+  binary_tmp=$(mktemp "${BINARY_PATH}.tmp.XXXXXX")
+  TMP_FILES+=("${binary_tmp}")
 
   curl "${CURL_DOWNLOAD_OPTS[@]}" -o "${binary_tmp}" "${binary_url}" || \
     error "Binary download failed from ${binary_url}. Please try again or contact E2E support."
@@ -377,20 +414,28 @@ install_binary() {
   step "Verifying collector checksum"
   verify_binary "${binary_tmp}" "e2e-otel-collector-linux-${ARCH}"
 
-  chmod +x "${binary_tmp}"
+  chmod 755 "${binary_tmp}"
   mv "${binary_tmp}" "${BINARY_PATH}"
   success "Verified binary installed at ${BINARY_PATH}"
 }
 
 write_configuration() {
   step "Writing collector configuration"
+  local env_tmp config_tmp
   mkdir -p "${CONFIG_DIR}" "${DATA_DIR}/tmp"
   chmod 755 "${CONFIG_DIR}"
   chmod 700 "${DATA_DIR}"
 
+  config_tmp=$(mktemp "${CONFIG_DIR}/.config.yaml.XXXXXX")
+  TMP_FILES+=("${config_tmp}")
+  curl "${CURL_OPTS[@]}" -o "${config_tmp}" "${PAGES_BASE}/samples/vm-config.yaml" || \
+    error "Failed to download vm-config.yaml from ${PAGES_BASE}/samples/vm-config.yaml."
+
   # Env file (mode 600 — credentials). HOST_NAME was computed and
   # sanitized before registration so both use the same value.
-  cat > "${CONFIG_DIR}/env" <<EOF
+  env_tmp=$(mktemp "${CONFIG_DIR}/.env.XXXXXX")
+  TMP_FILES+=("${env_tmp}")
+  cat > "${env_tmp}" <<EOF
 E2E_TOKEN=${E2E_TOKEN}
 HOST_NAME=${HOST_NAME}
 E2E_LOG_GROUP=${E2E_LOG_GROUP}
@@ -399,18 +444,19 @@ E2E_AGENT_ID=${E2E_AGENT_ID}
 E2E_CUSTOMER_ID=${E2E_CUSTOMER_ID}
 E2E_INTERNAL_GATEWAY=${INTERNAL_GATEWAY}
 EOF
-  chmod 600 "${CONFIG_DIR}/env"
-
-  # Collector config (fetched from GitHub Pages)
-  curl "${CURL_OPTS[@]}" -o "${CONFIG_DIR}/config.yaml" "${PAGES_BASE}/samples/vm-config.yaml" || \
-    error "Failed to download vm-config.yaml from ${PAGES_BASE}/samples/vm-config.yaml."
-  chmod 644 "${CONFIG_DIR}/config.yaml"
+  chmod 600 "${env_tmp}"
+  chmod 644 "${config_tmp}"
+  mv "${env_tmp}" "${CONFIG_DIR}/env"
+  mv "${config_tmp}" "${CONFIG_DIR}/config.yaml"
   success "Collector configuration written to ${CONFIG_DIR}"
 }
 
 install_service() {
   step "Installing and starting systemd service"
-  cat > "${SERVICE_FILE}" <<EOF
+  local service_tmp
+  service_tmp=$(mktemp "${SERVICE_FILE}.tmp.XXXXXX")
+  TMP_FILES+=("${service_tmp}")
+  cat > "${service_tmp}" <<EOF
 [Unit]
 Description=E2E Observability Agent
 Documentation=https://github.com/e2enetworks-oss/otel-collector
@@ -433,6 +479,8 @@ SyslogIdentifier=${SERVICE_NAME}
 [Install]
 WantedBy=multi-user.target
 EOF
+  chmod 644 "${service_tmp}"
+  mv "${service_tmp}" "${SERVICE_FILE}"
 
   # Start service
   systemctl daemon-reload
@@ -449,13 +497,6 @@ EOF
 }
 
 finish_install() {
-  # Install telemetry. Last, so it reports only installs that actually finished,
-  # and best-effort, so it can never be the reason one fails.
-  posthog_capture "vm_agent_installed" \
-    "\"arch\":\"${ARCH}\",\"distro\":\"${OS_ID:-unknown}\",\
-\"api_host\":\"${API_BASE_URL}\",\"gateway\":\"${INTERNAL_GATEWAY}\",\
-\"collector_binary\":\"e2e-otel-collector-linux-${ARCH}\""
-
   # Done
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -482,6 +523,7 @@ main() {
   success "Requirements passed. API: ${API_BASE_URL}"
 
   detect_platform
+  ensure_jq
   register_collector
   install_binary
   write_configuration

@@ -25,6 +25,7 @@ setup() {
   source "${REPO_ROOT}/install.sh"
   set -e
   set +u +o pipefail
+  JQ_BIN=$(command -v jq)
 }
 
 teardown() {
@@ -70,42 +71,53 @@ EOF
   [[ "$output" == *"Unsupported architecture: i686"* ]]
 }
 
-# ── parse_field (sed path — hide jq from PATH) ────────────────────────────────
+# ── parse_field ───────────────────────────────────────────────────────────────
 
-@test "parse_field extracts ingestion_token without jq" {
-  # parse_field probes for jq via `command -v jq`; shadowing the `command`
-  # builtin with a function that reports jq absent forces the sed path.
-  run bash -c '
-    source "'"${REPO_ROOT}"'/install.sh"
-    command() { if [ "$2" = "jq" ]; then return 1; fi; builtin command "$@"; }
-    parse_field "{\"ingestion_token\":\"sk_abc123\",\"log_group\":\"logs.vm.1\"}" "ingestion_token"
-  '
+@test "parse_field extracts a top-level string" {
+  run parse_field '{"ingestion_token":"sk_abc123","nested":{"ingestion_token":"wrong"}}' "ingestion_token"
   [ "$status" -eq 0 ]
   [ "$output" = "sk_abc123" ]
 }
 
-@test "parse_field reads a pretty-printed response without jq" {
-  run bash -c '
-    source "'"${REPO_ROOT}"'/install.sh"
-    command() { if [ "$2" = "jq" ]; then return 1; fi; builtin command "$@"; }
-    parse_field "{\"agent_id\" : \"agent-123\"}" "agent_id"
-  '
+@test "parse_field decodes escaped JSON characters" {
+  run parse_field '{"agent_id" : "agent-\"123"}' "agent_id"
   [ "$status" -eq 0 ]
-  [ "$output" = "agent-123" ]
+  [ "$output" = 'agent-"123' ]
 }
 
-@test "parse_field returns empty for missing field (sed path)" {
-  run bash -c '
-    source "'"${REPO_ROOT}"'/install.sh"
-    command() { if [ "$2" = "jq" ]; then return 1; fi; builtin command "$@"; }
-    parse_field "{\"log_group\":\"logs.vm.1\"}" "ingestion_token"
-  '
+@test "parse_field returns empty for missing field" {
+  run parse_field '{"log_group":"logs.vm.1"}' "ingestion_token"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
 
+@test "parse_field rejects malformed JSON" {
+  run parse_field '{"agent_id":' "agent_id"
+  [ "$status" -ne 0 ]
+}
+
+@test "registration_json escapes the personal access token" {
+  export E2E_PERSONAL_ACCESS_TOKEN='pat-"test'
+  HOST_NAME="web-01"
+  run registration_json
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r .apiKey)" = "$E2E_PERSONAL_ACCESS_TOKEN" ]
+}
+
+@test "ensure_jq reuses an installed parser" {
+  JQ_BIN=""
+  ensure_jq
+  [ -x "$JQ_BIN" ]
+}
+
+@test "validate_env_value rejects a newline from the API" {
+  run validate_env_value "agent_id" $'agent-123\nE2E_TOKEN=other'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"agent_id contains unsupported characters"* ]]
+}
+
 @test "register_collector names the agent_id returned by the Signals API" {
-  export E2E_PERSONAL_ACCESS_TOKEN="pat-test"
+  export E2E_PERSONAL_ACCESS_TOKEN='pat-"test'
   export E2E_INTERNAL_GATEWAY="gw.example:4317"
   unset E2E_API
   resolve_endpoints
@@ -113,13 +125,10 @@ EOF
 stub curl <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-  *pat-test*) exit 9 ;;
+  *'pat-"test'*) exit 9 ;;
 esac
 request=$(cat)
-case "$request" in
-  *'"apiKey":       "pat-test"'*) ;;
-  *) exit 9 ;;
-esac
+printf '%s' "$request" | jq -e '.apiKey == "pat-\"test" and .resourceType == "vm" and .hostname == "web-01"' >/dev/null || exit 9
 printf '{"agent_id":"agent-123","ingestion_token":"ingest-123","project_id":"project-123","log_group":"logs.web-01"}'
 EOF
   gateway_reachable() { return 0; }
@@ -262,6 +271,14 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
   [[ "$output" == *"E2E_API must be an API origin"* ]]
 }
 
+@test "resolve_endpoints rejects an API origin with whitespace" {
+  clear_endpoint_env
+  export E2E_API="api.example.com bad"
+  run resolve_endpoints
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must contain a hostname"* ]]
+}
+
 @test "resolve_endpoints takes the gateway from E2E_INTERNAL_GATEWAY" {
   clear_endpoint_env
   export E2E_INTERNAL_GATEWAY="10.0.0.5:31318"
@@ -298,6 +315,13 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
   [[ "$output" == *"must be host:port with no scheme"* ]]
 }
 
+@test "validate_gateway rejects a nonnumeric port" {
+  INTERNAL_GATEWAY="gw.example:abc"
+  run validate_gateway
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"numeric port"* ]]
+}
+
 @test "choose_gateway preserves an explicitly selected gateway" {
   clear_endpoint_env
   export E2E_API="https://dev.example"
@@ -331,70 +355,24 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
   [ "$output" = "10.0.0.5:31318" ]
 }
 
-# ── posthog_capture ──────────────────────────────────────────────────────────
-
-# A curl stub that leaves a marker file. posthog_capture redirects curl's stdout
-# and stderr to /dev/null, so anything the stub PRINTS is invisible to the test —
-# the marker is the only reliable evidence that the network was reached.
-CURL_MARKER=""
-loud_curl() {
-  CURL_MARKER="${STUB_DIR}/curl-was-called"
-  stub curl <<EOF
-#!/usr/bin/env bash
-touch "${CURL_MARKER}"
-exit 1
-EOF
-}
-
-@test "posthog_capture is a no-op when no key is configured" {
-  export E2E_TELEMETRY=1
-  unset E2E_POSTHOG_KEY
-  loud_curl
-  run posthog_capture "vm_agent_installed" '"arch":"amd64"'
-  [ "$status" -eq 0 ]
-  [ ! -f "$CURL_MARKER" ]
-}
-
-@test "posthog_capture sends nothing without opt-in, even with a key set" {
-  # The default. A customer who never set E2E_TELEMETRY sends nothing, whatever
-  # key the published script happens to ship with.
-  unset E2E_TELEMETRY
-  export E2E_POSTHOG_KEY="phc_test"
-  loud_curl
-  run posthog_capture "vm_agent_installed" '"arch":"amd64"'
-  [ "$status" -eq 0 ]
-  [ ! -f "$CURL_MARKER" ]
-}
-
-@test "telemetry_enabled accepts only affirmative opt-in values" {
-  for v in 1 true yes on; do
-    E2E_TELEMETRY="$v" telemetry_enabled || { echo "rejected affirmative: $v"; return 1; }
-  done
-  for v in "" 0 false no off maybe TRUE; do
-    if E2E_TELEMETRY="$v" telemetry_enabled; then echo "accepted non-affirmative: $v"; return 1; fi
-  done
-}
-
-@test "posthog_capture never fails the install when the endpoint is down" {
-  export E2E_TELEMETRY=1
-  export E2E_POSTHOG_KEY="phc_test"
-  export E2E_POSTHOG_HOST="http://127.0.0.1:1"
-  INSTALL_ID="deadbeef"
-  run posthog_capture "vm_agent_installed" '"arch":"amd64"'
-  [ "$status" -eq 0 ]
-}
-
 # ── gateway_reachable ────────────────────────────────────────────────────────
 
-@test "gateway_reachable reports reachable when timeout is unavailable" {
-  # Not being able to run the check is not evidence of an unreachable gateway,
-  # so it must not fail an install on a host without coreutils' timeout.
+@test "gateway_reachable reports that the check is unavailable without timeout" {
   run bash -c '
     source "'"${REPO_ROOT}"'/install.sh"
     command() { if [ "$2" = "timeout" ]; then return 1; fi; builtin command "$@"; }
     gateway_reachable "gw.example:31318"
   '
+  [ "$status" -eq 2 ]
+}
+
+@test "check_gateway warns when it cannot check reachability" {
+  INTERNAL_GATEWAY="gw.example:4317"
+  GATEWAY_DEFAULTED="yes"
+  gateway_reachable() { return 2; }
+  run check_gateway
   [ "$status" -eq 0 ]
+  [[ "$output" == *"WARN Could not check gateway reachability"* ]]
 }
 
 @test "gateway_reachable fails on a closed port" {
