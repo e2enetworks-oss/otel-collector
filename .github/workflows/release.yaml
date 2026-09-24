@@ -205,9 +205,10 @@ jobs:
           path: artifacts/
           merge-multiple: true
 
-      - name: Assemble Pages site (install.sh + samples + binaries + checksums)
+      - name: Assemble Pages site (index + install.sh + samples + binaries + checksums)
         run: |
           mkdir -p public/samples
+          cp site/index.html       public/index.html
           cp install.sh             public/install.sh
           cp samples/vm-config.yaml public/samples/vm-config.yaml
 
