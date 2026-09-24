@@ -3,26 +3,223 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>E2E Observability Agent downloads</title>
+  <meta name="description" content="Explore open source tools, images, blueprints, and examples from E2E Networks.">
+  <title>Open Source | E2E Networks</title>
   <style>
-    body { font: 16px/1.5 system-ui, sans-serif; max-width: 42rem; margin: 4rem auto; padding: 0 1.5rem; color: #17212b; }
-    h1 { line-height: 1.2; }
-    li { margin: .6rem 0; }
-    a { color: #0759a5; }
+    :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17263c; background: #f7f8fa; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; }
+    a { color: inherit; }
+    a:focus-visible { outline: 3px solid #f27642; outline-offset: 4px; border-radius: 4px; }
+    .wrap { width: min(1180px, calc(100% - 48px)); margin-inline: auto; }
+    .site-header { background: #fff; border-bottom: 1px solid #e6eaf0; }
+    .header-inner { min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+    .brand { display: inline-flex; align-items: center; gap: 12px; text-decoration: none; font-weight: 750; font-size: 1.05rem; letter-spacing: -.03em; white-space: nowrap; }
+    .brand-mark { display: inline-grid; place-items: center; width: 42px; height: 42px; border-radius: 11px; background: #ef6938; color: #fff; font-size: .84rem; font-weight: 850; letter-spacing: -.08em; }
+    .brand-divider { height: 22px; width: 1px; background: #cfd6df; }
+    .brand-label { color: #6a788a; font-size: .88rem; font-weight: 650; letter-spacing: 0; }
+    nav { display: flex; align-items: center; gap: clamp(18px, 3vw, 38px); }
+    nav a { text-decoration: none; font-size: .9rem; font-weight: 650; color: #536278; }
+    nav a:hover, .text-link:hover { color: #d95021; }
+    .hero { position: relative; overflow: hidden; background: #101d30; color: #fff; }
+    .hero::before { content: ""; position: absolute; inset: 0; background: radial-gradient(circle at 82% 8%, #f2764238, transparent 33%), radial-gradient(circle at 75% 90%, #3e6ba63d, transparent 38%); pointer-events: none; }
+    .hero-inner { position: relative; display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(280px, .85fr); gap: 64px; align-items: center; padding-block: 94px 100px; }
+    .eyebrow { display: inline-flex; align-items: center; gap: 9px; margin: 0 0 21px; color: #ffb797; font-size: .78rem; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
+    .eyebrow::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #ef6938; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { max-width: 750px; margin-bottom: 22px; font-size: clamp(2.8rem, 5.6vw, 5.25rem); line-height: 1.04; letter-spacing: -.065em; }
+    .hero-copy { max-width: 610px; margin-bottom: 34px; color: #bfc9d8; font-size: clamp(1rem, 1.55vw, 1.2rem); line-height: 1.7; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; }
+    .button { display: inline-flex; align-items: center; justify-content: center; min-height: 46px; padding: 0 20px; border: 1px solid transparent; border-radius: 9px; text-decoration: none; font-weight: 750; font-size: .9rem; transition: transform .16s ease, background .16s ease, border-color .16s ease; }
+    .button:hover { transform: translateY(-2px); }
+    .button-primary { background: #f27642; color: #182235; }
+    .button-primary:hover { background: #ffa06f; }
+    .button-secondary { border-color: #536179; color: #fff; }
+    .button-secondary:hover { border-color: #c5cedd; background: #ffffff10; }
+    .hero-panel { padding: 28px; border: 1px solid #42506a; border-radius: 18px; background: #ffffff0b; box-shadow: 0 30px 75px #00000020; }
+    .panel-label { margin-bottom: 22px; color: #9baac1; font-size: .76rem; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+    .panel-row { display: flex; align-items: center; gap: 13px; padding: 15px 0; border-top: 1px solid #ffffff1b; font-size: .94rem; font-weight: 650; }
+    .panel-icon { display: inline-grid; place-items: center; flex: 0 0 35px; width: 35px; height: 35px; border-radius: 9px; background: #f2764226; color: #ffb797; font-size: 1rem; }
+    .section { padding-block: 82px; }
+    .section-head { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+    .section-kicker { margin-bottom: 9px; color: #d65324; font-size: .75rem; font-weight: 850; letter-spacing: .12em; text-transform: uppercase; }
+    h2 { margin-bottom: 10px; font-size: clamp(2rem, 3vw, 2.8rem); line-height: 1.16; letter-spacing: -.05em; }
+    .section-intro { margin-bottom: 0; color: #607087; line-height: 1.65; }
+    .text-link { flex: 0 0 auto; padding-bottom: 5px; color: #263b57; font-size: .9rem; font-weight: 750; text-decoration: none; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+    .card { display: flex; flex-direction: column; min-height: 243px; padding: 27px; border: 1px solid #e0e5ec; border-radius: 15px; background: #fff; text-decoration: none; box-shadow: 0 5px 20px #1e37540a; transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease; }
+    .card:hover { transform: translateY(-4px); border-color: #f1aa88; box-shadow: 0 16px 32px #1e375417; }
+    .card-top { display: flex; justify-content: space-between; align-items: start; gap: 12px; margin-bottom: 26px; }
+    .card-icon { display: inline-grid; place-items: center; width: 43px; height: 43px; border-radius: 11px; background: #fff0e9; color: #d65324; font-size: 1.18rem; font-weight: 850; }
+    .card-arrow { color: #8a97a8; font-size: 1.2rem; }
+    h3 { margin-bottom: 10px; font-size: 1.13rem; letter-spacing: -.025em; }
+    .card p { margin-bottom: 21px; color: #627186; font-size: .9rem; line-height: 1.6; }
+    .card-tag { margin-top: auto; color: #9b5a41; font-size: .75rem; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+    .downloads { border-top: 1px solid #e4e8ef; background: #fff; }
+    .downloads-inner { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); gap: 68px; align-items: start; }
+    .downloads-copy { max-width: 420px; }
+    .downloads-copy p:last-child { color: #607087; line-height: 1.7; }
+    .download-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+    .download-list a { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; padding: 15px 18px; border: 1px solid #e0e5ec; border-radius: 9px; color: #263b57; font-size: .92rem; font-weight: 700; text-decoration: none; }
+    .download-list a:hover { border-color: #f1aa88; color: #d65324; }
+    .download-list span { color: #8a97a8; font-weight: 500; }
+    .release-note { margin: 14px 0 0; color: #718096; font-size: .79rem; line-height: 1.5; }
+    footer { padding-block: 27px; border-top: 1px solid #e4e8ef; background: #fff; }
+    .footer-inner { display: flex; justify-content: space-between; gap: 20px; color: #708095; font-size: .82rem; }
+    .footer-inner a { text-decoration: none; }
+    .footer-inner a:hover { color: #d65324; }
+    @media (max-width: 900px) {
+      .hero-inner { grid-template-columns: 1fr; gap: 42px; padding-block: 70px; }
+      .hero-panel { max-width: 560px; }
+      .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .downloads-inner { grid-template-columns: 1fr; gap: 30px; }
+    }
+    @media (max-width: 620px) {
+      .wrap { width: min(100% - 32px, 1180px); }
+      .header-inner { min-height: 68px; }
+      .brand-label, .brand-divider, nav a:first-child, nav a:nth-child(2) { display: none; }
+      .hero-inner { padding-block: 62px; }
+      .hero-panel { padding: 20px; }
+      .section { padding-block: 58px; }
+      .section-head { display: block; }
+      .section-head .text-link { display: inline-block; margin-top: 15px; }
+      .cards { grid-template-columns: 1fr; }
+      .card { min-height: 210px; }
+      .footer-inner { flex-direction: column; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .button, .card { transition: none; }
+    }
   </style>
 </head>
 <body>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a class="brand" href="https://www.e2enetworks.com/" aria-label="E2E Networks home">
+        <span class="brand-mark">E2E</span>
+        <span>E2E Networks</span>
+        <span class="brand-divider" aria-hidden="true"></span>
+        <span class="brand-label">Open Source</span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="#projects">Projects</a>
+        <a href="#downloads">Collector downloads</a>
+        <a href="https://github.com/e2enetworks-oss">GitHub ↗</a>
+      </nav>
+    </div>
+  </header>
+
   <main>
-    <h1>E2E Observability Agent</h1>
-    <p>Download the Linux installer and collector release assets.</p>
-    <ul>
-      <li><a href="./install.sh">Linux installer</a></li>
-      <li><a href="./samples/vm-config.yaml">VM collector configuration</a></li>
-      <li><a href="./e2e-otel-collector-linux-amd64">Linux amd64 collector</a></li>
-      <li><a href="./e2e-otel-collector-linux-arm64">Linux arm64 collector</a></li>
-      <li><a href="./checksums.txt">SHA-256 checksums</a></li>
-    </ul>
-    <p>Binary downloads and checksums appear after the first collector release.</p>
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="wrap hero-inner">
+        <div>
+          <p class="eyebrow">E2E Networks Open Source</p>
+          <h1 id="hero-title">Built in the open. Ready to build with.</h1>
+          <p class="hero-copy">Explore the tools, infrastructure images, and examples we use to make cloud development on E2E Networks simpler.</p>
+          <div class="actions">
+            <a class="button button-primary" href="#projects">Explore projects ↓</a>
+            <a class="button button-secondary" href="https://github.com/e2enetworks-oss">View GitHub organization ↗</a>
+          </div>
+        </div>
+        <div class="hero-panel" aria-label="Open source areas">
+          <p class="panel-label">Explore the ecosystem</p>
+          <div class="panel-row"><span class="panel-icon" aria-hidden="true">⌘</span>Developer tools</div>
+          <div class="panel-row"><span class="panel-icon" aria-hidden="true">▣</span>Platform infrastructure</div>
+          <div class="panel-row"><span class="panel-icon" aria-hidden="true">◉</span>Observability</div>
+          <div class="panel-row"><span class="panel-icon" aria-hidden="true">✳</span>AI examples</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section wrap" id="projects" aria-labelledby="projects-title">
+      <div class="section-head">
+        <div>
+          <p class="section-kicker">Explore our work</p>
+          <h2 id="projects-title">Open source projects</h2>
+          <p class="section-intro">Source code, examples, and tools from the E2E Networks community.</p>
+        </div>
+        <a class="text-link" href="https://github.com/orgs/e2enetworks-oss/repositories">Browse all repositories ↗</a>
+      </div>
+      <div class="cards">
+        <a class="card" href="https://github.com/e2enetworks-oss/platform-images">
+          <div class="card-top"><span class="card-icon" aria-hidden="true">▣</span><span class="card-arrow" aria-hidden="true">↗</span></div>
+          <h3>Platform Images</h3>
+          <p>Multi architecture CI base images for Python, Rust, Bun, Node, and more, published to GHCR.</p>
+          <span class="card-tag">Infrastructure · Shell</span>
+        </a>
+        <a class="card" href="https://github.com/e2enetworks-oss/e2ectl">
+          <div class="card-top"><span class="card-icon" aria-hidden="true">&gt;_</span><span class="card-arrow" aria-hidden="true">↗</span></div>
+          <h3>e2ectl</h3>
+          <p>Manage E2E MyAccount compute, databases, networking, storage, and access from the terminal.</p>
+          <span class="card-tag">Developer tools · TypeScript</span>
+        </a>
+        <a class="card" href="https://github.com/e2enetworks-oss/otel-collector">
+          <div class="card-top"><span class="card-icon" aria-hidden="true">◉</span><span class="card-arrow" aria-hidden="true">↗</span></div>
+          <h3>Observability Collector</h3>
+          <p>Collect and send telemetry from Linux virtual machines with the E2E Observability Agent.</p>
+          <span class="card-tag">Observability · Shell</span>
+        </a>
+        <a class="card" href="https://github.com/e2enetworks-oss/marketplace-blueprints">
+          <div class="card-top"><span class="card-icon" aria-hidden="true">◇</span><span class="card-arrow" aria-hidden="true">↗</span></div>
+          <h3>Marketplace Blueprints</h3>
+          <p>Versioned Helm charts for applications and AI workloads on the E2E Cloud Marketplace.</p>
+          <span class="card-tag">Kubernetes · Helm</span>
+        </a>
+        <a class="card" href="https://github.com/e2enetworks-oss/e2enetworks-skills">
+          <div class="card-top"><span class="card-icon" aria-hidden="true">✳</span><span class="card-arrow" aria-hidden="true">↗</span></div>
+          <h3>E2E Networks Skills</h3>
+          <p>Manage cloud resources in plain English from coding agents that support the Agent Skills format.</p>
+          <span class="card-tag">AI agents · Skills</span>
+        </a>
+        <a class="card" href="https://github.com/e2enetworks-oss/agentrecall">
+          <div class="card-top"><span class="card-icon" aria-hidden="true">◎</span><span class="card-arrow" aria-hidden="true">↗</span></div>
+          <h3>AgentRecall</h3>
+          <p>An agent memory example using E2E DBaaS for PostgreSQL and pgvector for semantic search.</p>
+          <span class="card-tag">AI examples · TypeScript</span>
+        </a>
+        <a class="card" href="https://github.com/e2enetworks-oss/extended-ceph-exporter">
+          <div class="card-top"><span class="card-icon" aria-hidden="true">◫</span><span class="card-arrow" aria-hidden="true">↗</span></div>
+          <h3>Extended Ceph Exporter</h3>
+          <p>Expose detailed Ceph and RADOS Gateway metrics for collection by Prometheus.</p>
+          <span class="card-tag">Observability · Go</span>
+        </a>
+        <a class="card" href="https://github.com/e2enetworks-oss/content">
+          <div class="card-top"><span class="card-icon" aria-hidden="true">✓</span><span class="card-arrow" aria-hidden="true">↗</span></div>
+          <h3>Compliance Content</h3>
+          <p>Security policy and automation content in SCAP, Ansible, Bash, and other formats.</p>
+          <span class="card-tag">Security · Automation</span>
+        </a>
+      </div>
+    </section>
+
+    <section class="section downloads" id="downloads" aria-labelledby="downloads-title">
+      <div class="wrap downloads-inner">
+        <div class="downloads-copy">
+          <p class="section-kicker">Collector resources</p>
+          <h2 id="downloads-title">Get the observability agent</h2>
+          <p>Install the Linux collector or download its configuration and release assets. See the <a href="https://github.com/e2enetworks-oss/otel-collector">repository</a> for setup instructions.</p>
+        </div>
+        <div>
+          <ul class="download-list">
+            <li><a href="./install.sh">Linux installer <span>Shell script ↓</span></a></li>
+            <li><a href="./samples/vm-config.yaml">VM collector configuration <span>YAML ↓</span></a></li>
+            <li><a href="./e2e-otel-collector-linux-amd64">Linux amd64 collector <span>Binary ↓</span></a></li>
+            <li><a href="./e2e-otel-collector-linux-arm64">Linux arm64 collector <span>Binary ↓</span></a></li>
+            <li><a href="./checksums.txt">SHA-256 checksums <span>Text ↓</span></a></li>
+          </ul>
+          <p class="release-note">Collector binaries and checksums are mirrored here from the latest release.</p>
+        </div>
+      </div>
+    </section>
   </main>
+
+  <footer>
+    <div class="wrap footer-inner">
+      <span>© E2E Networks · Built in the open</span>
+      <span><a href="https://github.com/e2enetworks-oss">GitHub</a> · <a href="https://www.e2enetworks.com/">e2enetworks.com</a></span>
+    </div>
+  </footer>
 </body>
 </html>
