@@ -2,6 +2,7 @@ name: Publish install assets to GitHub Pages
 
 # Serves the curated install surface at
 # https://e2enetworks-oss.github.io/otel-collector/ :
+#   - site/index.html                  (Pages landing page)
 #   - install.sh                       (the VM installer)
 #   - samples/vm-config.yaml           (reference collector config)
 #   - e2e-otel-collector-linux-amd64   ─┐ mirrored from the latest GitHub
@@ -16,15 +17,16 @@ name: Publish install assets to GitHub Pages
 #   1. Release time → release.yaml's `mirror-pages` job mirrors the freshly built
 #      binaries in the SAME run (no `release: published` hop — GitHub won't trigger
 #      a workflow from a GITHUB_TOKEN-authored release event).
-#   2. install.sh / samples change on main → THIS workflow re-deploys the install
-#      assets and re-mirrors the current release binaries so a docs-only change
-#      never wipes the binaries off Pages.
+#   2. site / install.sh / samples change on main → THIS workflow re-deploys
+#      the install assets and re-mirrors the current release binaries so an
+#      asset-only change never wipes the binaries off Pages.
 
 on:
   push:
     branches: [main]
     paths:
       - 'install.sh'
+      - 'site/**'
       - 'samples/**'
       - '.github/workflows/pages.yaml'
   workflow_dispatch:
@@ -46,9 +48,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Assemble publish directory (install.sh + samples)
+      - name: Assemble publish directory (index + install.sh + samples)
         run: |
           mkdir -p public/samples
+          cp site/index.html       public/index.html
           cp install.sh             public/install.sh
           cp samples/vm-config.yaml public/samples/vm-config.yaml
 
