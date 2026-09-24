@@ -70,11 +70,11 @@ EOF
   [[ "$output" == *"Unsupported architecture: i686"* ]]
 }
 
-# ── parse_field (grep/cut path — hide jq from PATH) ──────────────────────────
+# ── parse_field (sed path — hide jq from PATH) ────────────────────────────────
 
 @test "parse_field extracts ingestion_token without jq" {
   # parse_field probes for jq via `command -v jq`; shadowing the `command`
-  # builtin with a function that reports jq absent forces the grep/cut path.
+  # builtin with a function that reports jq absent forces the sed path.
   run bash -c '
     source "'"${REPO_ROOT}"'/install.sh"
     command() { if [ "$2" = "jq" ]; then return 1; fi; builtin command "$@"; }
@@ -84,7 +84,17 @@ EOF
   [ "$output" = "sk_abc123" ]
 }
 
-@test "parse_field returns empty for missing field (grep path)" {
+@test "parse_field reads a pretty-printed response without jq" {
+  run bash -c '
+    source "'"${REPO_ROOT}"'/install.sh"
+    command() { if [ "$2" = "jq" ]; then return 1; fi; builtin command "$@"; }
+    parse_field "{\"agent_id\" : \"agent-123\"}" "agent_id"
+  '
+  [ "$status" -eq 0 ]
+  [ "$output" = "agent-123" ]
+}
+
+@test "parse_field returns empty for missing field (sed path)" {
   run bash -c '
     source "'"${REPO_ROOT}"'/install.sh"
     command() { if [ "$2" = "jq" ]; then return 1; fi; builtin command "$@"; }
@@ -92,6 +102,46 @@ EOF
   '
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "register_collector names the agent_id returned by the Signals API" {
+  export E2E_PERSONAL_ACCESS_TOKEN="pat-test"
+  export E2E_INTERNAL_GATEWAY="gw.example:4317"
+  unset E2E_API
+  resolve_endpoints
+  HOST_NAME="web-01"
+stub curl <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *pat-test*) exit 9 ;;
+esac
+request=$(cat)
+case "$request" in
+  *'"apiKey":       "pat-test"'*) ;;
+  *) exit 9 ;;
+esac
+printf '{"agent_id":"agent-123","ingestion_token":"ingest-123","project_id":"project-123","log_group":"logs.web-01"}'
+EOF
+  gateway_reachable() { return 0; }
+  register_collector
+  [ "$E2E_AGENT_ID" = "agent-123" ]
+  [ "$E2E_TOKEN" = "ingest-123" ]
+}
+
+@test "register_collector warns when the Signals API omits agent_id" {
+  export E2E_PERSONAL_ACCESS_TOKEN="pat-test"
+  export E2E_INTERNAL_GATEWAY="gw.example:4317"
+  unset E2E_API
+  resolve_endpoints
+  HOST_NAME="web-01"
+  stub curl <<'EOF'
+#!/usr/bin/env bash
+printf '{"ingestion_token":"ingest-123","project_id":"project-123","log_group":"logs.web-01"}'
+EOF
+  gateway_reachable() { return 0; }
+  run register_collector
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARN Signals API returned credentials without agent_id"* ]]
 }
 
 # ── preflight ─────────────────────────────────────────────────────────────────
@@ -106,7 +156,7 @@ EOF
   [[ "$output" == *"must be run as root"* ]]
 }
 
-@test "preflight fails when E2E_API_KEY is missing" {
+@test "preflight fails when E2E_PERSONAL_ACCESS_TOKEN is missing" {
   stub id <<'EOF'
 #!/usr/bin/env bash
 echo "0"
@@ -115,16 +165,16 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  unset E2E_API_KEY
+  unset E2E_PERSONAL_ACCESS_TOKEN
   run preflight
   [ "$status" -ne 0 ]
-  [[ "$output" == *"E2E_API_KEY is not set"* ]]
+  [[ "$output" == *"E2E_PERSONAL_ACCESS_TOKEN is not set"* ]]
 }
 
 # preflight reads the resolved globals, which resolve_endpoints fills. The
-# customer path — API key and nothing else — is the case that regressed once
-# already, so it is asserted end to end from an empty environment.
-@test "preflight passes with only E2E_API_KEY set" {
+# customer path — personal access token and nothing else — once regressed, so
+# it is asserted from an empty endpoint environment.
+@test "preflight passes with only E2E_PERSONAL_ACCESS_TOKEN set" {
   stub id <<'EOF'
 #!/usr/bin/env bash
 echo "0"
@@ -133,8 +183,8 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  export E2E_API_KEY=key
-  unset E2E_API E2E_INTERNAL_GATEWAY E2E_REGISTER_API E2E_GATEWAY_ENDPOINT
+  export E2E_PERSONAL_ACCESS_TOKEN=token
+  unset E2E_API E2E_INTERNAL_GATEWAY
   resolve_endpoints
   run preflight
   [ "$status" -eq 0 ]
@@ -149,8 +199,8 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  export E2E_API_KEY=key
-  GATEWAY_ENDPOINT="https://gw.example:31318"
+  export E2E_PERSONAL_ACCESS_TOKEN=token
+  INTERNAL_GATEWAY="https://gw.example:31318"
   run preflight
   [ "$status" -ne 0 ]
   [[ "$output" == *"no scheme"* ]]
@@ -165,8 +215,8 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  export E2E_API_KEY=key
-  GATEWAY_ENDPOINT="gw.example"
+  export E2E_PERSONAL_ACCESS_TOKEN=token
+  INTERNAL_GATEWAY="gw.example"
   run preflight
   [ "$status" -ne 0 ]
   [[ "$output" == *"must include a port"* ]]
@@ -176,14 +226,14 @@ EOF
 # Called directly, never through `run`: it sets globals, and `run` would
 # evaluate it in a subshell where those assignments are thrown away.
 
-clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY E2E_REGISTER_API E2E_GATEWAY_ENDPOINT; }
+clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
 
 @test "resolve_endpoints falls back to production with nothing set" {
   clear_endpoint_env
   resolve_endpoints
-  [ "$API_HOST" = "api.e2enetworks.com" ]
-  [ "$REGISTER_API" = "https://api.e2enetworks.com/v1/install/register" ]
-  [ "$GATEWAY_ENDPOINT" = "signals.e2enetworks.net:4317" ]
+  [ "$API_BASE_URL" = "https://api.e2enetworks.com" ]
+  [ "$REGISTER_URL" = "https://api.e2enetworks.com/v1/install/register" ]
+  [ "$INTERNAL_GATEWAY" = "signals.e2enetworks.net:4317" ]
   [ "$GATEWAY_DEFAULTED" = "yes" ]
 }
 
@@ -191,35 +241,80 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY E2E_REGISTER_API E2E_G
   clear_endpoint_env
   export E2E_API="api-groot.e2enetworks.net"
   resolve_endpoints
-  [ "$REGISTER_API" = "https://api-groot.e2enetworks.net/v1/install/register" ]
+  [ "$REGISTER_URL" = "https://api-groot.e2enetworks.net/v1/install/register" ]
   # E2E_API selects the API only. The gateway has its own variable.
-  [ "$GATEWAY_ENDPOINT" = "signals.e2enetworks.net:4317" ]
+  [ "$INTERNAL_GATEWAY" = "signals.e2enetworks.net:4317" ]
 }
 
-@test "resolve_endpoints lets E2E_REGISTER_API win over the derived URL" {
+@test "resolve_endpoints derives a NodePort registration URL from E2E_API" {
   clear_endpoint_env
-  export E2E_API="api-groot.e2enetworks.net"
-  export E2E_REGISTER_API="http://10.0.0.5:31881/v1/install/register"
+  export E2E_API="http://10.0.0.5:31881/"
   resolve_endpoints
-  [ "$REGISTER_API" = "http://10.0.0.5:31881/v1/install/register" ]
+  [ "$API_BASE_URL" = "http://10.0.0.5:31881" ]
+  [ "$REGISTER_URL" = "http://10.0.0.5:31881/v1/install/register" ]
+}
+
+@test "resolve_endpoints rejects an E2E_API containing a path" {
+  clear_endpoint_env
+  export E2E_API="https://api.example/v1"
+  run resolve_endpoints
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"E2E_API must be an API origin"* ]]
 }
 
 @test "resolve_endpoints takes the gateway from E2E_INTERNAL_GATEWAY" {
   clear_endpoint_env
   export E2E_INTERNAL_GATEWAY="10.0.0.5:31318"
   resolve_endpoints
-  [ "$GATEWAY_ENDPOINT" = "10.0.0.5:31318" ]
+  [ "$INTERNAL_GATEWAY" = "10.0.0.5:31318" ]
   # Drives check_gateway: a defaulted endpoint is fatal, a chosen one warns.
   [ "$GATEWAY_DEFAULTED" = "no" ]
 }
 
-@test "resolve_endpoints lets E2E_GATEWAY_ENDPOINT win over E2E_INTERNAL_GATEWAY" {
+@test "choose_gateway refuses to pair a dev API with the production gateway" {
   clear_endpoint_env
-  export E2E_INTERNAL_GATEWAY="from-internal.example"
-  export E2E_GATEWAY_ENDPOINT="from-endpoint.example:31318"
+  export E2E_API="https://dev.example"
   resolve_endpoints
-  [ "$GATEWAY_ENDPOINT" = "from-endpoint.example:31318" ]
+  run choose_gateway ""
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Set E2E_INTERNAL_GATEWAY"* ]]
+}
+
+@test "choose_gateway accepts a gateway returned by the Signals API" {
+  clear_endpoint_env
+  export E2E_API="https://dev.example"
+  resolve_endpoints
+  choose_gateway "gw.dev.example"
+  [ "$INTERNAL_GATEWAY" = "gw.dev.example:4317" ]
   [ "$GATEWAY_DEFAULTED" = "no" ]
+}
+
+@test "choose_gateway rejects a URL returned by the Signals API" {
+  clear_endpoint_env
+  export E2E_API="https://dev.example"
+  resolve_endpoints
+  run choose_gateway "https://gw.dev.example:4317"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be host:port with no scheme"* ]]
+}
+
+@test "choose_gateway preserves an explicitly selected gateway" {
+  clear_endpoint_env
+  export E2E_API="https://dev.example"
+  export E2E_INTERNAL_GATEWAY="my-gateway.example:31318"
+  resolve_endpoints
+  choose_gateway "gw.from.api.example"
+  [ "$INTERNAL_GATEWAY" = "my-gateway.example:31318" ]
+  [ "$GATEWAY_DEFAULTED" = "no" ]
+}
+
+@test "status messages identify success and failure without color when piped" {
+  run success "Service is active"
+  [ "$status" -eq 0 ]
+  [ "$output" = "[e2e-install] PASS Service is active" ]
+  run error "Service failed"
+  [ "$status" -eq 1 ]
+  [ "$output" = "[e2e-install] FAIL Service failed" ]
 }
 
 # ── normalize_gateway ────────────────────────────────────────────────────────
@@ -307,6 +402,13 @@ EOF
   # refused immediately rather than hanging until the 5s timeout.
   run gateway_reachable "127.0.0.1:1"
   [ "$status" -ne 0 ]
+}
+
+@test "gateway_reachable does not execute a gateway value as shell code" {
+  timeout() { shift; "$@"; }
+  local marker="${STUB_DIR}/gateway-command-ran"
+  gateway_reachable "127.0.0.1:1; touch ${marker}" || true
+  [ ! -e "$marker" ]
 }
 
 # ── checksum verification ────────────────────────────────────────────────────

@@ -8,7 +8,8 @@
 #   E2E_TOKEN        — ingestion token from the register API
 #   E2E_LOG_GROUP    — log group name (e.g. logs.infra.vm.1016)
 #   E2E_PROJECT_ID   — E2E project ID
-#   E2E_GATEWAY_ENDPOINT
+#   E2E_AGENT_ID     — collector agent ID, when returned by the Signals API
+#   E2E_INTERNAL_GATEWAY
 #                    — otel-gateway OTLP/gRPC listener as host:port
 #                      (e.g. <gateway-host>:31318). No scheme, no path.
 # =============================================================================
@@ -142,8 +143,8 @@ processors:
 exporters:
   otlp/gateway:
     # otel-gateway OTLP/gRPC listener, as host:port — no scheme, no path.
-    # Written to the env file by install.sh from E2E_GATEWAY_ENDPOINT.
-    endpoint: "${env:E2E_GATEWAY_ENDPOINT}"
+    # Written to the env file by install.sh from E2E_INTERNAL_GATEWAY.
+    endpoint: "${env:E2E_INTERNAL_GATEWAY}"
     tls:
       insecure: true
     headers:

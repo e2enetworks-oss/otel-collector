@@ -15,38 +15,39 @@ There is no hand-written collector Go source here. `main.go` and `components.go`
 ## Install
 
 ```bash
-E2E_API_KEY=<your-api-key> \
+E2E_PERSONAL_ACCESS_TOKEN=<your-personal-access-token> \
   bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 ```
 
-Root, systemd, `curl`, and a Linux VM on amd64 or arm64. The API key is the only value you supply — the register call derives your tenant from it and returns the signal ingestion token used for logs, metrics and traces, alongside the project id. The VM's hostname is sent automatically, which is what gives each host its own log group.
+Root, systemd, `curl`, and a Linux VM on amd64 or arm64. Your personal access token is the only required value. The installer sends the detected hostname to the Signals API and receives a separate ingestion token, project ID, and log group. If the API returns `agent_id`, the installer shows that collector agent ID and saves it locally. The personal access token is not written to the collector's env file.
 
 Full operator guide, including verification and uninstall: [Install the Virtual Machine Collector](https://runbooks.e2enetworks.net/observability/agents/vm/install) (internal).
 
 ### Pointing at a different deployment
 
-Engineers installing against a dev stack override the target. Each variable is narrower than the one above it:
+Engineers installing against a dev stack can select its API origin and gateway:
 
 | Variable | Default | Use when |
 |---|---|---|
-| `E2E_API_KEY` | — **required** | Always. From MyAccount → API IAM. |
-| `E2E_API` | `api.e2enetworks.com` | The key came from a dev API. Hostname only, no scheme or path. |
+| `E2E_PERSONAL_ACCESS_TOKEN` | — **required** | Always. From MyAccount → API IAM. |
+| `E2E_API` | `https://api.e2enetworks.com` | API origin. A bare host uses HTTPS; use `http://host:port` for an internal NodePort. The installer appends `/v1/install/register`. |
 | `E2E_INTERNAL_GATEWAY` | `signals.e2enetworks.net` | Signals go somewhere other than production. Hostname, or `host:port` when it is not on `4317`. |
-| `E2E_REGISTER_API` | `https://$E2E_API/v1/install/register` | The API does not sit at that path — a NodePort, say: `http://10.0.0.5:31881/v1/install/register`. |
-| `E2E_GATEWAY_ENDPOINT` | — | Alias for `E2E_INTERNAL_GATEWAY`; it is the name the collector config and env file already use, so it wins where both are set. |
 
 ```bash
-E2E_API_KEY=<key> E2E_API=api-groot.e2enetworks.net \
+E2E_PERSONAL_ACCESS_TOKEN=<token> E2E_API=http://10.0.0.5:31881 \
+  E2E_INTERNAL_GATEWAY=10.0.0.5:31318 \
   bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 ```
 
-If the register response carries a `gateway_endpoint`, it beats the default — the API knows which gateway serves that tenant. An explicitly set gateway still wins over both.
+If registration returns a `gateway_endpoint`, it beats the production default. An explicitly set `E2E_INTERNAL_GATEWAY` wins over the response. When `E2E_API` points away from production, the installer requires one of those gateway values so it cannot silently ship a dev tenant's signals to production.
 
-The installer refuses to finish if it cannot open a TCP connection to a gateway it derived itself, because an unreachable gateway does not stop the collector — the service stays `active`, retries each batch for five minutes and then drops it, so the only symptom is missing data. A gateway you set explicitly warns instead and continues.
+The installer refuses to finish if it cannot open a TCP connection to the default gateway. An unreachable gateway does not stop the collector — the service stays `active`, retries each batch for five minutes and then drops it. A gateway you set explicitly or the API supplies warns instead and continues when the TCP check fails.
 
 It also verifies the downloaded binary against the published `checksums.txt` and refuses on a mismatch, on an unlisted file, or when the manifest cannot be fetched. A failed install leaves no partial binary behind.
 
-Re-running the installer on the same VM is safe: registration returns the same token for the same key and hostname, and the config, env file and unit are rewritten.
+Re-running the installer on the same VM rewrites the config, env file and unit. The Signals API must keep registration idempotent for the same personal access token and hostname so reruns keep the same collector agent ID.
+
+Install output shows each phase as `STEP`, `PASS`, `WARN`, or `FAIL`, with colors on interactive terminals. It stays plain when piped or when `NO_COLOR` is set. Registration warns if the API omits `agent_id`; service `PASS` means systemd reports it active, not that telemetry has reached the gateway.
 
 ---
 
