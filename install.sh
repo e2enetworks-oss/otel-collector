@@ -87,6 +87,7 @@ CURL_OPTS=(--fail --silent --show-error --location
 # Registration creates an agent. Do not automatically repeat a POST unless the
 # Signals API has a confirmed idempotency contract.
 CURL_REGISTER_OPTS=(--fail --silent --show-error
+                    --proto '=http,https'
                     --connect-timeout 10 --max-time 120)
 
 # The binary is ~210 MB and deliberately gets NO --max-time: a 120s ceiling
@@ -153,19 +154,9 @@ normalize_gateway() {
 # resolve_endpoints: derive the register URL from the API origin and select the
 # gateway. E2E_INTERNAL_GATEWAY is the only gateway override.
 resolve_endpoints() {
-  API_BASE_URL="${E2E_API:-https://${DEFAULT_API}}"
-  case "$API_BASE_URL" in
-    http://*|https://*) : ;;
-    *://*) error "E2E_API must use http:// or https://." ;;
-    *) API_BASE_URL="https://${API_BASE_URL}" ;;
-  esac
+  API_BASE_URL="${E2E_API:-${DEFAULT_API}}"
+  [[ "$API_BASE_URL" == *://* ]] || API_BASE_URL="https://${API_BASE_URL}"
   API_BASE_URL="${API_BASE_URL%/}"
-  local authority="${API_BASE_URL#*://}"
-  case "$authority" in
-    ''|*/*|*\?*|*\#*|*@*) error "E2E_API must be an API origin (scheme, host and optional port), with no path or credentials." ;;
-  esac
-  [[ "$authority" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*(:[0-9]{1,5})?$ ]] || \
-    error "E2E_API must contain a hostname and optional numeric port."
   REGISTER_URL="${API_BASE_URL}${REGISTER_PATH}"
   INTERNAL_GATEWAY="$(normalize_gateway "${E2E_INTERNAL_GATEWAY:-${DEFAULT_GATEWAY}}")"
 

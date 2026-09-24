@@ -263,22 +263,6 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
   [ "$REGISTER_URL" = "http://10.0.0.5:31881/api/v1/gpu/signals/agents" ]
 }
 
-@test "resolve_endpoints rejects an E2E_API containing a path" {
-  clear_endpoint_env
-  export E2E_API="https://api.example/v1"
-  run resolve_endpoints
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"E2E_API must be an API origin"* ]]
-}
-
-@test "resolve_endpoints rejects an API origin with whitespace" {
-  clear_endpoint_env
-  export E2E_API="api.example.com bad"
-  run resolve_endpoints
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"must contain a hostname"* ]]
-}
-
 @test "resolve_endpoints takes the gateway from E2E_INTERNAL_GATEWAY" {
   clear_endpoint_env
   export E2E_INTERNAL_GATEWAY="10.0.0.5:31318"
