@@ -125,7 +125,7 @@ EOF
 
 @test "register_collector names the agent_id returned by the Signals API" {
   export E2E_PERSONAL_ACCESS_TOKEN='pat-"test'
-  export E2E_INTERNAL_GATEWAY="gw.example:4317"
+  export E2E_GATEWAY_ENDPOINT="gw.example:4317"
   unset E2E_API
   resolve_endpoints
   HOST_NAME="web-01"
@@ -146,7 +146,7 @@ EOF
 
 @test "register_collector fails when the Signals API omits agent_id" {
   export E2E_PERSONAL_ACCESS_TOKEN="pat-test"
-  export E2E_INTERNAL_GATEWAY="gw.example:4317"
+  export E2E_GATEWAY_ENDPOINT="gw.example:4317"
   unset E2E_API
   resolve_endpoints
   HOST_NAME="web-01"
@@ -200,7 +200,7 @@ EOF
 exit 0
 EOF
   export E2E_PERSONAL_ACCESS_TOKEN=token
-  unset E2E_API E2E_INTERNAL_GATEWAY
+  unset E2E_API E2E_GATEWAY_ENDPOINT E2E_INTERNAL_GATEWAY
   resolve_endpoints
   run preflight
   [ "$status" -eq 0 ]
@@ -242,7 +242,7 @@ EOF
 # Called directly, never through `run`: it sets globals, and `run` would
 # evaluate it in a subshell where those assignments are thrown away.
 
-clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
+clear_endpoint_env() { unset E2E_API E2E_GATEWAY_ENDPOINT E2E_INTERNAL_GATEWAY; }
 
 @test "resolve_endpoints falls back to production with nothing set" {
   clear_endpoint_env
@@ -270,13 +270,39 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
   [ "$REGISTER_URL" = "http://10.0.0.5:31881/api/v1/gpu/signals/agents" ]
 }
 
-@test "resolve_endpoints takes the gateway from E2E_INTERNAL_GATEWAY" {
+@test "resolve_endpoints takes the gateway from E2E_GATEWAY_ENDPOINT" {
   clear_endpoint_env
-  export E2E_INTERNAL_GATEWAY="10.0.0.5:31318"
+  export E2E_GATEWAY_ENDPOINT="10.0.0.5:31318"
   resolve_endpoints
   [ "$INTERNAL_GATEWAY" = "10.0.0.5:31318" ]
   # Drives check_gateway: a defaulted endpoint is fatal, a chosen one warns.
   [ "$GATEWAY_DEFAULTED" = "no" ]
+}
+
+@test "resolve_endpoints still honours the deprecated E2E_INTERNAL_GATEWAY" {
+  # An install command written against the old name must keep working.
+  clear_endpoint_env
+  export E2E_INTERNAL_GATEWAY="10.0.0.5:31318"
+  resolve_endpoints
+  [ "$INTERNAL_GATEWAY" = "10.0.0.5:31318" ]
+  [ "$GATEWAY_DEFAULTED" = "no" ]
+}
+
+@test "the new gateway name wins when both are set" {
+  clear_endpoint_env
+  export E2E_INTERNAL_GATEWAY="old.example:1111"
+  export E2E_GATEWAY_ENDPOINT="new.example:2222"
+  resolve_endpoints
+  [ "$INTERNAL_GATEWAY" = "new.example:2222" ]
+}
+
+@test "a bare gateway host gets the default OTLP port" {
+  # The documented default is signals.e2enetworks.net:4317, so a host written
+  # the way people say it out loud must resolve to that port.
+  clear_endpoint_env
+  export E2E_GATEWAY_ENDPOINT="signals.e2enetworks.net"
+  resolve_endpoints
+  [ "$INTERNAL_GATEWAY" = "signals.e2enetworks.net:4317" ]
 }
 
 @test "choose_gateway refuses to pair a dev API with the production gateway" {
@@ -285,7 +311,7 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
   resolve_endpoints
   run choose_gateway ""
   [ "$status" -ne 0 ]
-  [[ "$output" == *"Set E2E_INTERNAL_GATEWAY"* ]]
+  [[ "$output" == *"Set E2E_GATEWAY_ENDPOINT"* ]]
 }
 
 @test "choose_gateway accepts a gateway returned by the Signals API" {
@@ -316,7 +342,7 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
 @test "choose_gateway preserves an explicitly selected gateway" {
   clear_endpoint_env
   export E2E_API="https://dev.example"
-  export E2E_INTERNAL_GATEWAY="my-gateway.example:31318"
+  export E2E_GATEWAY_ENDPOINT="my-gateway.example:31318"
   resolve_endpoints
   choose_gateway "gw.from.api.example"
   [ "$INTERNAL_GATEWAY" = "my-gateway.example:31318" ]

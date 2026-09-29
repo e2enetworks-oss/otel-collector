@@ -19,7 +19,7 @@ E2E_PERSONAL_ACCESS_TOKEN=<your-personal-access-token> \
 |---|---|---|
 | `E2E_PERSONAL_ACCESS_TOKEN` | Required | Personal access token from TIR > Personal access token. |
 | `E2E_API` | `api.e2enetworks.com` | API origin. A bare host uses HTTPS; `http://host:port` works for an internal NodePort. The installer adds the registration path. |
-| `E2E_REGISTRATION_API` | `observability` | Which API mints the ingestion token: `observability` (GET, available today) or `signals` (POST, returns an agent id). |
+| `E2E_GATEWAY_ENDPOINT` | `signals.e2enetworks.net:4317` | OTLP/gRPC destination. Use a host or `host:port`. A gateway returned by the API overrides this default. |
 
 For example:
 

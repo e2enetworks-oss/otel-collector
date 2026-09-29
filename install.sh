@@ -7,7 +7,7 @@
 # That installs against production. For a dev stack, set its API origin and
 # gateway — see the Endpoints block below:
 #   E2E_PERSONAL_ACCESS_TOKEN=<token> E2E_API=http://10.0.0.5:31881 \
-#     E2E_INTERNAL_GATEWAY=10.0.0.5:31318 \
+#     E2E_GATEWAY_ENDPOINT=10.0.0.5:31318 \
 #     bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 
 set -euo pipefail
@@ -32,16 +32,18 @@ PAGES_BASE="https://e2enetworks-oss.github.io/otel-collector"
 #                    token. A bare host uses HTTPS. For a NodePort, include the
 #                    scheme and port: http://10.0.0.5:31881. No path.
 #
-# E2E_INTERNAL_GATEWAY
+# E2E_GATEWAY_ENDPOINT
 #                    The gateway the agent ships signals to. Hostname, or
 #                    host:port when it is not on the default OTLP/gRPC port.
 #                    Default: production. Example: 10.0.0.5:31318
+#                    An endpoint returned by the API overrides this.
+#                    E2E_INTERNAL_GATEWAY is accepted as a deprecated alias.
 #
 # The registration URL is always derived from E2E_API and REGISTER_PATH.
 DEFAULT_API="api.e2enetworks.com"
 DEFAULT_GATEWAY="signals.e2enetworks.net"
 
-# The OTLP/gRPC port assumed when E2E_INTERNAL_GATEWAY names a host with no
+# The OTLP/gRPC port assumed when E2E_GATEWAY_ENDPOINT names a host with no
 # port. 4317 is the OTel standard and the `grpc` port on the gateway Service;
 # 31318 is only its NodePort, so a hostname fronting a load balancer lands here.
 DEFAULT_GATEWAY_PORT="4317"
@@ -163,7 +165,7 @@ ensure_jq() {
 # ── Pure functions (unit-testable via bats) ──────────────────────────────────
 
 # normalize_gateway <host-or-host:port>: echo host:port, filling in the default
-# OTLP/gRPC port when the value names a bare host. Lets E2E_INTERNAL_GATEWAY be
+# OTLP/gRPC port when the value names a bare host. Lets E2E_GATEWAY_ENDPOINT be
 # written the way people say it out loud — "signals.e2enetworks.net".
 normalize_gateway() {
   case "$1" in
@@ -173,19 +175,29 @@ normalize_gateway() {
 }
 
 # resolve_endpoints: derive the register URL from the API origin and select the
-# gateway. E2E_INTERNAL_GATEWAY is the only gateway override.
+# gateway.
+#
+# One name for the gateway, in and out: E2E_GATEWAY_ENDPOINT is what an operator
+# sets AND what gets written to the collector's env file, so the value the
+# installer was given and the value the collector reads are spelled the same.
+# E2E_INTERNAL_GATEWAY stays accepted as a deprecated alias so an existing
+# install command keeps working; the new name wins when both are set.
 resolve_endpoints() {
+  local chosen_gateway
   API_BASE_URL="${E2E_API:-${DEFAULT_API}}"
   [[ "$API_BASE_URL" == *://* ]] || API_BASE_URL="https://${API_BASE_URL}"
   API_BASE_URL="${API_BASE_URL%/}"
   REGISTER_URL="${API_BASE_URL}${REGISTER_PATH}"
-  INTERNAL_GATEWAY="$(normalize_gateway "${E2E_INTERNAL_GATEWAY:-${DEFAULT_GATEWAY}}")"
+
+  chosen_gateway="${E2E_GATEWAY_ENDPOINT:-${E2E_INTERNAL_GATEWAY:-}}"
+  INTERNAL_GATEWAY="$(normalize_gateway "${chosen_gateway:-${DEFAULT_GATEWAY}}")"
 
   # Whether the gateway is this script's default or somebody's choice decides
   # how hard we check it below: a value an operator typed is their claim to
   # make, a value this script supplied has to prove itself before we ship
-  # telemetry at it.
-  if [ -n "${E2E_INTERNAL_GATEWAY:-}" ]; then
+  # telemetry at it. GATEWAY_DEFAULTED carries that one fact for the rest of the
+  # run, so nothing downstream has to re-read the environment to ask again.
+  if [ -n "${chosen_gateway}" ]; then
     GATEWAY_DEFAULTED="no"
   else
     GATEWAY_DEFAULTED="yes"
@@ -258,7 +270,7 @@ check_gateway() {
   if [ "${GATEWAY_DEFAULTED}" = "yes" ]; then
     error "Cannot reach the default gateway ${INTERNAL_GATEWAY}. This host may be \
 outside the E2E internal network, or this deployment may use a different gateway. \
-Set E2E_INTERNAL_GATEWAY=<host> (or <host>:<port>) for your environment, then \
+Set E2E_GATEWAY_ENDPOINT=<host> (or <host>:<port>) for your environment, then \
 re-run. Installing now would collect telemetry and drop it."
   fi
   warn "${INTERNAL_GATEWAY} is not reachable from this host right now. \
@@ -270,14 +282,17 @@ and drops telemetry with no error beyond the service journal."
 # silently fall back to the production gateway when it omits that field.
 choose_gateway() {
   local served_gateway="$1"
-  if [ -n "${served_gateway}" ] && [ -z "${E2E_INTERNAL_GATEWAY:-}" ]; then
+  # "Still on the default" is the same question as "the operator named no
+  # gateway", and resolve_endpoints already answered it — an explicit choice
+  # outranks whatever the API returns.
+  if [ -n "${served_gateway}" ] && [ "${GATEWAY_DEFAULTED}" = "yes" ]; then
     INTERNAL_GATEWAY="$(normalize_gateway "${served_gateway}")"
     validate_gateway
     GATEWAY_DEFAULTED="no"
     success "API selected gateway ${INTERNAL_GATEWAY}."
-  elif [ -z "${served_gateway}" ] && [ -z "${E2E_INTERNAL_GATEWAY:-}" ] && \
+  elif [ -z "${served_gateway}" ] && [ "${GATEWAY_DEFAULTED}" = "yes" ] && \
        [ "${API_BASE_URL}" != "https://${DEFAULT_API}" ]; then
-    error "The API did not return a gateway for ${API_BASE_URL}. Set E2E_INTERNAL_GATEWAY for this deployment."
+    error "The API did not return a gateway for ${API_BASE_URL}. Set E2E_GATEWAY_ENDPOINT for this deployment."
   fi
 }
 
