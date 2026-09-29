@@ -9,7 +9,7 @@
 #   E2E_LOG_GROUP    — log group name (e.g. logs.infra.vm.1016)
 #   E2E_PROJECT_ID   — E2E project ID
 #   E2E_AGENT_ID     — collector agent ID returned by the Signals API
-#   E2E_INTERNAL_GATEWAY
+#   E2E_GATEWAY_ENDPOINT
 #                    — otel-gateway OTLP/gRPC listener as host:port
 #                      (e.g. <gateway-host>:31318). No scheme, no path.
 # =============================================================================
@@ -93,6 +93,14 @@ receivers:
         value: "${env:HOST_NAME}"
 
   # ── Host OS metrics ───────────────────────────────────────────────────────
+  # Local OTLP — application traces, and any metrics or logs a process on this
+  # VM pushes. Bound to 0.0.0.0 rather than localhost so containers without
+  # --network host can reach it on the VM's routable address.
+  otlp/local:
+    protocols:
+      http:
+        endpoint: "0.0.0.0:4318"
+
   hostmetrics:
     collection_interval: 30s
     scrapers:
@@ -143,8 +151,8 @@ processors:
 exporters:
   otlp/gateway:
     # otel-gateway OTLP/gRPC listener, as host:port — no scheme, no path.
-    # Written to the env file by install.sh from E2E_INTERNAL_GATEWAY.
-    endpoint: "${env:E2E_INTERNAL_GATEWAY}"
+    # Written to the env file by install.sh from E2E_GATEWAY_ENDPOINT.
+    endpoint: "${env:E2E_GATEWAY_ENDPOINT}"
     tls:
       insecure: true
     headers:
@@ -159,7 +167,11 @@ service:
   extensions: [health_check, file_storage]
   pipelines:
     metrics/infrastructure:
-      receivers: [hostmetrics]
+      receivers: [hostmetrics, otlp/local]
+      processors: [memory_limiter, resource/node, batch]
+      exporters: [otlp/gateway]
+    traces:
+      receivers: [otlp/local]
       processors: [memory_limiter, resource/node, batch]
       exporters: [otlp/gateway]
     logs:

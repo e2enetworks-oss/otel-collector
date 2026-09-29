@@ -7,7 +7,7 @@
 # That installs against production. For a dev stack, set its API origin and
 # gateway — see the Endpoints block below:
 #   E2E_PERSONAL_ACCESS_TOKEN=<token> E2E_API=http://10.0.0.5:31881 \
-#     E2E_INTERNAL_GATEWAY=10.0.0.5:31318 \
+#     E2E_GATEWAY_ENDPOINT=10.0.0.5:31318 \
 #     bash -c "$(curl -fsSL https://e2enetworks-oss.github.io/otel-collector/install.sh)"
 
 set -euo pipefail
@@ -32,22 +32,45 @@ PAGES_BASE="https://e2enetworks-oss.github.io/otel-collector"
 #                    token. A bare host uses HTTPS. For a NodePort, include the
 #                    scheme and port: http://10.0.0.5:31881. No path.
 #
-# E2E_INTERNAL_GATEWAY
+# E2E_GATEWAY_ENDPOINT
 #                    The gateway the agent ships signals to. Hostname, or
 #                    host:port when it is not on the default OTLP/gRPC port.
 #                    Default: production. Example: 10.0.0.5:31318
+#                    An endpoint returned by the API overrides this.
+#                    E2E_INTERNAL_GATEWAY is accepted as a deprecated alias.
 #
 # The registration URL is always derived from E2E_API and REGISTER_PATH.
 DEFAULT_API="api.e2enetworks.com"
 DEFAULT_GATEWAY="signals.e2enetworks.net"
 
-# The OTLP/gRPC port assumed when E2E_INTERNAL_GATEWAY names a host with no
+# The OTLP/gRPC port assumed when E2E_GATEWAY_ENDPOINT names a host with no
 # port. 4317 is the OTel standard and the `grpc` port on the gateway Service;
 # 31318 is only its NodePort, so a hostname fronting a load balancer lands here.
 DEFAULT_GATEWAY_PORT="4317"
 
 # The Signals API creates a collector agent and returns its agent_id here.
 REGISTER_PATH="/api/v1/gpu/signals/agents"
+
+# The Observability tokens API answers the same question without creating an
+# agent record: which tenant does this host belong to, and what may it ship
+# with. It is a GET, the token travels as a bearer header, and the project is
+# read from the token's own row rather than anything the caller sends.
+TOKENS_PATH="/api/v1/gpu/observability/tokens/"
+
+# Which API mints the ingestion token.
+#   observability — GET TOKENS_PATH        (available today)
+#   signals       — POST REGISTER_PATH     (returns an agent_id; not yet live)
+# Both authenticate with E2E_PERSONAL_ACCESS_TOKEN; they differ in what they
+# create and what they return, so this is a real choice rather than a URL swap.
+REGISTRATION_API="${E2E_REGISTRATION_API:-observability}"
+
+# Both registration paths fill these, but not the same ones: the tokens API
+# creates no agent record, so it never sets E2E_AGENT_ID. write_configuration
+# and finish_install reference every one of them unconditionally, and the script
+# runs under `set -u` — so an unset variable is not an empty string here, it is
+# an abort partway through an install that has already downloaded the binary.
+E2E_AGENT_ID=""
+E2E_CUSTOMER_ID=""
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 COLOR_BLUE='' COLOR_GREEN='' COLOR_YELLOW='' COLOR_RED='' COLOR_RESET=''
@@ -142,7 +165,7 @@ ensure_jq() {
 # ── Pure functions (unit-testable via bats) ──────────────────────────────────
 
 # normalize_gateway <host-or-host:port>: echo host:port, filling in the default
-# OTLP/gRPC port when the value names a bare host. Lets E2E_INTERNAL_GATEWAY be
+# OTLP/gRPC port when the value names a bare host. Lets E2E_GATEWAY_ENDPOINT be
 # written the way people say it out loud — "signals.e2enetworks.net".
 normalize_gateway() {
   case "$1" in
@@ -152,19 +175,29 @@ normalize_gateway() {
 }
 
 # resolve_endpoints: derive the register URL from the API origin and select the
-# gateway. E2E_INTERNAL_GATEWAY is the only gateway override.
+# gateway.
+#
+# One name for the gateway, in and out: E2E_GATEWAY_ENDPOINT is what an operator
+# sets AND what gets written to the collector's env file, so the value the
+# installer was given and the value the collector reads are spelled the same.
+# E2E_INTERNAL_GATEWAY stays accepted as a deprecated alias so an existing
+# install command keeps working; the new name wins when both are set.
 resolve_endpoints() {
+  local chosen_gateway
   API_BASE_URL="${E2E_API:-${DEFAULT_API}}"
   [[ "$API_BASE_URL" == *://* ]] || API_BASE_URL="https://${API_BASE_URL}"
   API_BASE_URL="${API_BASE_URL%/}"
   REGISTER_URL="${API_BASE_URL}${REGISTER_PATH}"
-  INTERNAL_GATEWAY="$(normalize_gateway "${E2E_INTERNAL_GATEWAY:-${DEFAULT_GATEWAY}}")"
+
+  chosen_gateway="${E2E_GATEWAY_ENDPOINT:-${E2E_INTERNAL_GATEWAY:-}}"
+  INTERNAL_GATEWAY="$(normalize_gateway "${chosen_gateway:-${DEFAULT_GATEWAY}}")"
 
   # Whether the gateway is this script's default or somebody's choice decides
   # how hard we check it below: a value an operator typed is their claim to
   # make, a value this script supplied has to prove itself before we ship
-  # telemetry at it.
-  if [ -n "${E2E_INTERNAL_GATEWAY:-}" ]; then
+  # telemetry at it. GATEWAY_DEFAULTED carries that one fact for the rest of the
+  # run, so nothing downstream has to re-read the environment to ask again.
+  if [ -n "${chosen_gateway}" ]; then
     GATEWAY_DEFAULTED="no"
   else
     GATEWAY_DEFAULTED="yes"
@@ -237,7 +270,7 @@ check_gateway() {
   if [ "${GATEWAY_DEFAULTED}" = "yes" ]; then
     error "Cannot reach the default gateway ${INTERNAL_GATEWAY}. This host may be \
 outside the E2E internal network, or this deployment may use a different gateway. \
-Set E2E_INTERNAL_GATEWAY=<host> (or <host>:<port>) for your environment, then \
+Set E2E_GATEWAY_ENDPOINT=<host> (or <host>:<port>) for your environment, then \
 re-run. Installing now would collect telemetry and drop it."
   fi
   warn "${INTERNAL_GATEWAY} is not reachable from this host right now. \
@@ -249,14 +282,17 @@ and drops telemetry with no error beyond the service journal."
 # silently fall back to the production gateway when it omits that field.
 choose_gateway() {
   local served_gateway="$1"
-  if [ -n "${served_gateway}" ] && [ -z "${E2E_INTERNAL_GATEWAY:-}" ]; then
+  # "Still on the default" is the same question as "the operator named no
+  # gateway", and resolve_endpoints already answered it — an explicit choice
+  # outranks whatever the API returns.
+  if [ -n "${served_gateway}" ] && [ "${GATEWAY_DEFAULTED}" = "yes" ]; then
     INTERNAL_GATEWAY="$(normalize_gateway "${served_gateway}")"
     validate_gateway
     GATEWAY_DEFAULTED="no"
-    success "Signals API selected gateway ${INTERNAL_GATEWAY}."
-  elif [ -z "${served_gateway}" ] && [ -z "${E2E_INTERNAL_GATEWAY:-}" ] && \
+    success "API selected gateway ${INTERNAL_GATEWAY}."
+  elif [ -z "${served_gateway}" ] && [ "${GATEWAY_DEFAULTED}" = "yes" ] && \
        [ "${API_BASE_URL}" != "https://${DEFAULT_API}" ]; then
-    error "The Signals API did not return a gateway for ${API_BASE_URL}. Set E2E_INTERNAL_GATEWAY for this deployment."
+    error "The API did not return a gateway for ${API_BASE_URL}. Set E2E_GATEWAY_ENDPOINT for this deployment."
   fi
 }
 
@@ -348,6 +384,56 @@ detect_platform() {
 
 }
 
+# register_via_tokens_api: ask TIR which tenant this host is, and for the
+# credentials to ship as it.
+#
+# GET, because nothing is created on the caller's behalf that did not already
+# exist — repeat calls for the same project and hostname return the SAME token,
+# so a retry never orphans a running agent's credential.
+#
+# The token goes in a curl config file read from stdin, not on the command line.
+# `-H "Authorization: Bearer $PAT"` would put a 365-day credential into argv,
+# where every other process on the host can read it out of `ps`.
+register_via_tokens_api() {
+  step "Requesting ingestion credentials from the Observability API (host: ${HOST_NAME})"
+  local tokens_url register_response served_gateway
+  tokens_url="${API_BASE_URL}${TOKENS_PATH}?hostname=${HOST_NAME}"
+
+  register_response=$(printf 'header = "Authorization: Bearer %s"\n' \
+      "${E2E_PERSONAL_ACCESS_TOKEN}" |
+    curl "${CURL_REGISTER_OPTS[@]}" -K - "${tokens_url}") || \
+    error "Observability API request failed. Check E2E_PERSONAL_ACCESS_TOKEN belongs to the project this host should report into, that it was issued by ${API_BASE_URL}, and that the host is reachable."
+
+  E2E_TOKEN=$(parse_field "${register_response}" "ingestion_token") || \
+    error "Observability API returned invalid JSON instead of a credentials response."
+  E2E_LOG_GROUP=$(parse_field "${register_response}" "log_group")
+  E2E_PROJECT_ID=$(parse_field "${register_response}" "project_id")
+  E2E_CUSTOMER_ID=$(parse_field "${register_response}" "customer_id")
+  served_gateway=$(parse_field "${register_response}" "gateway_endpoint")
+
+  # A partial response would install an agent that ships nothing, or ships to
+  # the wrong place. Both fail silently, so fail loudly here instead.
+  [ -n "${E2E_TOKEN:-}" ]       || error "Registration failed: ingestion_token missing."
+  [ -n "${E2E_LOG_GROUP:-}" ]   || error "Registration failed: log_group missing."
+  [ -n "${E2E_PROJECT_ID:-}" ]  || error "Registration failed: project_id missing."
+  validate_env_value "ingestion_token" "$E2E_TOKEN"
+  validate_env_value "log_group" "$E2E_LOG_GROUP"
+  validate_env_value "project_id" "$E2E_PROJECT_ID"
+  validate_env_value "customer_id" "$E2E_CUSTOMER_ID"
+
+  # There is no agent_id on this path: the tokens API creates no agent record.
+  # customer_id is shown, never stored — the gateway stamps it from the token at
+  # ingest, so a copy on the host would be a rival source of truth.
+  success "Registered project ${E2E_PROJECT_ID}${E2E_CUSTOMER_ID:+ (customer ${E2E_CUSTOMER_ID})}, log group ${E2E_LOG_GROUP}."
+
+  # An endpoint the API named beats anything this script defaulted to: it knows
+  # which gateway serves this tenant, and it is authoritative per environment.
+  # TLS is not negotiated here: samples/vm-config.yaml carries the exporter's
+  # tls setting, so the API returns an address and nothing about how to trust it.
+  choose_gateway "${served_gateway}"
+  check_gateway
+}
+
 register_collector() {
   step "Registering collector with the Signals API (host: ${HOST_NAME})"
   local request_json register_response served_gateway
@@ -433,7 +519,7 @@ E2E_LOG_GROUP=${E2E_LOG_GROUP}
 E2E_PROJECT_ID=${E2E_PROJECT_ID}
 E2E_AGENT_ID=${E2E_AGENT_ID}
 E2E_CUSTOMER_ID=${E2E_CUSTOMER_ID}
-E2E_INTERNAL_GATEWAY=${INTERNAL_GATEWAY}
+E2E_GATEWAY_ENDPOINT=${INTERNAL_GATEWAY}
 EOF
   chmod 600 "${env_tmp}"
   chmod 644 "${config_tmp}"
@@ -494,7 +580,11 @@ finish_install() {
   echo " E2E Observability Agent installed; service is active."
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo " Host:      ${HOST_NAME}"
-  echo " Agent ID:  ${E2E_AGENT_ID}"
+  # Only the Signals API issues an agent id; on the tokens path the line would
+  # read "Agent ID:" with nothing after it, which looks like a failed lookup.
+  if [ -n "${E2E_AGENT_ID}" ]; then
+    echo " Agent ID:  ${E2E_AGENT_ID}"
+  fi
   echo " Log group: ${E2E_LOG_GROUP}"
   echo " Project:   ${E2E_PROJECT_ID}"
   echo ""
@@ -515,7 +605,11 @@ main() {
 
   detect_platform
   ensure_jq
-  register_collector
+  case "${REGISTRATION_API}" in
+    observability) register_via_tokens_api ;;
+    signals)       register_collector ;;
+    *) error "E2E_REGISTRATION_API must be 'observability' or 'signals', got '${REGISTRATION_API}'." ;;
+  esac
   install_binary
   write_configuration
   install_service

@@ -25,7 +25,14 @@ setup() {
   source "${REPO_ROOT}/install.sh"
   set -e
   set +u +o pipefail
-  JQ_BIN=$(command -v jq)
+
+  # install.sh normally downloads its own jq and points JQ_BIN at it; the tests
+  # borrow whatever jq is on PATH instead. `|| true` is load-bearing: with
+  # errexit restored above, a bare assignment from a failing `command -v` aborts
+  # setup for all 38 tests and bats reports only "Executed 0 instead of 38",
+  # naming neither the line nor the missing dependency.
+  JQ_BIN="$(command -v jq || true)"
+  [ -n "${JQ_BIN}" ] || skip "jq is not installed; parse_field tests need it"
 }
 
 teardown() {
@@ -118,7 +125,7 @@ EOF
 
 @test "register_collector names the agent_id returned by the Signals API" {
   export E2E_PERSONAL_ACCESS_TOKEN='pat-"test'
-  export E2E_INTERNAL_GATEWAY="gw.example:4317"
+  export E2E_GATEWAY_ENDPOINT="gw.example:4317"
   unset E2E_API
   resolve_endpoints
   HOST_NAME="web-01"
@@ -139,7 +146,7 @@ EOF
 
 @test "register_collector fails when the Signals API omits agent_id" {
   export E2E_PERSONAL_ACCESS_TOKEN="pat-test"
-  export E2E_INTERNAL_GATEWAY="gw.example:4317"
+  export E2E_GATEWAY_ENDPOINT="gw.example:4317"
   unset E2E_API
   resolve_endpoints
   HOST_NAME="web-01"
@@ -193,7 +200,7 @@ EOF
 exit 0
 EOF
   export E2E_PERSONAL_ACCESS_TOKEN=token
-  unset E2E_API E2E_INTERNAL_GATEWAY
+  unset E2E_API E2E_GATEWAY_ENDPOINT E2E_INTERNAL_GATEWAY
   resolve_endpoints
   run preflight
   [ "$status" -eq 0 ]
@@ -235,7 +242,7 @@ EOF
 # Called directly, never through `run`: it sets globals, and `run` would
 # evaluate it in a subshell where those assignments are thrown away.
 
-clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
+clear_endpoint_env() { unset E2E_API E2E_GATEWAY_ENDPOINT E2E_INTERNAL_GATEWAY; }
 
 @test "resolve_endpoints falls back to production with nothing set" {
   clear_endpoint_env
@@ -263,13 +270,39 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
   [ "$REGISTER_URL" = "http://10.0.0.5:31881/api/v1/gpu/signals/agents" ]
 }
 
-@test "resolve_endpoints takes the gateway from E2E_INTERNAL_GATEWAY" {
+@test "resolve_endpoints takes the gateway from E2E_GATEWAY_ENDPOINT" {
   clear_endpoint_env
-  export E2E_INTERNAL_GATEWAY="10.0.0.5:31318"
+  export E2E_GATEWAY_ENDPOINT="10.0.0.5:31318"
   resolve_endpoints
   [ "$INTERNAL_GATEWAY" = "10.0.0.5:31318" ]
   # Drives check_gateway: a defaulted endpoint is fatal, a chosen one warns.
   [ "$GATEWAY_DEFAULTED" = "no" ]
+}
+
+@test "resolve_endpoints still honours the deprecated E2E_INTERNAL_GATEWAY" {
+  # An install command written against the old name must keep working.
+  clear_endpoint_env
+  export E2E_INTERNAL_GATEWAY="10.0.0.5:31318"
+  resolve_endpoints
+  [ "$INTERNAL_GATEWAY" = "10.0.0.5:31318" ]
+  [ "$GATEWAY_DEFAULTED" = "no" ]
+}
+
+@test "the new gateway name wins when both are set" {
+  clear_endpoint_env
+  export E2E_INTERNAL_GATEWAY="old.example:1111"
+  export E2E_GATEWAY_ENDPOINT="new.example:2222"
+  resolve_endpoints
+  [ "$INTERNAL_GATEWAY" = "new.example:2222" ]
+}
+
+@test "a bare gateway host gets the default OTLP port" {
+  # The documented default is signals.e2enetworks.net:4317, so a host written
+  # the way people say it out loud must resolve to that port.
+  clear_endpoint_env
+  export E2E_GATEWAY_ENDPOINT="signals.e2enetworks.net"
+  resolve_endpoints
+  [ "$INTERNAL_GATEWAY" = "signals.e2enetworks.net:4317" ]
 }
 
 @test "choose_gateway refuses to pair a dev API with the production gateway" {
@@ -278,7 +311,7 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
   resolve_endpoints
   run choose_gateway ""
   [ "$status" -ne 0 ]
-  [[ "$output" == *"Set E2E_INTERNAL_GATEWAY"* ]]
+  [[ "$output" == *"Set E2E_GATEWAY_ENDPOINT"* ]]
 }
 
 @test "choose_gateway accepts a gateway returned by the Signals API" {
@@ -309,7 +342,7 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
 @test "choose_gateway preserves an explicitly selected gateway" {
   clear_endpoint_env
   export E2E_API="https://dev.example"
-  export E2E_INTERNAL_GATEWAY="my-gateway.example:31318"
+  export E2E_GATEWAY_ENDPOINT="my-gateway.example:31318"
   resolve_endpoints
   choose_gateway "gw.from.api.example"
   [ "$INTERNAL_GATEWAY" = "my-gateway.example:31318" ]
@@ -411,4 +444,37 @@ bbb222  e2e-otel-collector-linux-arm64"
 @test "the suite can actually fail — guards the errexit restore in setup" {
   run bash -c 'exit 3'
   [ "$status" -eq 3 ]
+}
+
+# setup() clears nounset so the other tests can reference bare variables, which
+# means this whole file is blind to unbound-variable aborts — and install.sh
+# really runs under `set -euo pipefail`. These two run in a fresh `bash -u` for
+# that reason. The observability path sets no agent id, and both the env file
+# and the summary expand E2E_AGENT_ID unconditionally; before those were given
+# top-level defaults, every install on that path died at write_configuration,
+# after the ~210 MB binary had already been downloaded.
+@test "summary survives nounset when no agent id was issued" {
+  run bash -u -c "
+    set +e; source '${REPO_ROOT}/install.sh'; set -e; set -u
+    HOST_NAME=h E2E_LOG_GROUP=g E2E_PROJECT_ID=1 finish_install
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Agent ID"* ]]
+  [[ "$output" == *"Log group: g"* ]]
+}
+
+@test "the env file expands under nounset when no agent id was issued" {
+  run bash -u -c "
+    set +e; source '${REPO_ROOT}/install.sh'; set -e; set -u
+    E2E_TOKEN=t HOST_NAME=h E2E_LOG_GROUP=g E2E_PROJECT_ID=1 INTERNAL_GATEWAY=gw:4317
+    cat <<EOF
+E2E_TOKEN=\${E2E_TOKEN}
+E2E_AGENT_ID=\${E2E_AGENT_ID}
+E2E_CUSTOMER_ID=\${E2E_CUSTOMER_ID}
+E2E_GATEWAY_ENDPOINT=\${INTERNAL_GATEWAY}
+EOF
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"E2E_AGENT_ID="* ]]
+  [[ "$output" == *"E2E_GATEWAY_ENDPOINT=gw:4317"* ]]
 }
