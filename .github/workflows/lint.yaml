@@ -35,4 +35,6 @@ jobs:
           curl "${CURL_DOWNLOAD_OPTS[@]}" -o "$archive" "${UPSTREAM_RELEASE}/$archive"
           verify_archive "$archive" "$archive"
           tar -xzf "$archive" otelcol-contrib
+          # Match the storage directories created by the VM installer.
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 700 "$DATA_DIR" "$DATA_DIR/tmp"
           ./otelcol-contrib validate --config=samples/vm-config.yaml

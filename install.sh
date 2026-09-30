@@ -397,8 +397,9 @@ install_binary() {
   verify_archive "${unpack_dir}/${archive}" "$archive"
   tar -xzf "${unpack_dir}/${archive}" -C "$unpack_dir" otelcol-contrib || \
     error "Could not unpack the upstream collector binary."
-  [ -f "${unpack_dir}/otelcol-contrib" ] && [ ! -L "${unpack_dir}/otelcol-contrib" ] || \
+  if [ ! -f "${unpack_dir}/otelcol-contrib" ] || [ -L "${unpack_dir}/otelcol-contrib" ]; then
     error "The upstream archive did not contain a regular collector binary."
+  fi
   mkdir -p "$(dirname "$BINARY_PATH")"
   binary_tmp=$(mktemp "${BINARY_PATH}.tmp.XXXXXX")
   TMP_FILES+=("$binary_tmp")
