@@ -1,3 +1,8 @@
+## [Unreleased]
+
+- Upgrade Linux and Windows collector components and the OpenTelemetry Collector Builder to 0.162.0.
+- Use Go 1.26.0 in Continuous Integration (CI), matching the builder's minimum supported version.
+
 ## [0.148.0] - 2026-06-16
 
 - feat(install): serve install.sh, samples, and binaries from GitHub Pages

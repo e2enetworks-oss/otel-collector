@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Existing git tag to (re)build and release, e.g. v0.148.0'
+        description: 'Existing git tag to (re)build and release, e.g. v0.162.0'
         required: true
         type: string
 
@@ -20,11 +20,11 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ── Tag / version contract ────────────────────────────────────────────────
+  # ── Tag / version agreement ────────────────────────────────────────────────
   # The release tag tracks the OTel Collector version this binary is built from
-  # (otelcol_version in collector/builder-config.yaml). A v0.148.0 tag must build
-  # the 0.148.0 collector. A trailing -e2e.N suffix is allowed so multiple E2E
-  # builds can ship on the same OTel base (v0.148.0-e2e.1). Runs on tag pushes
+  # (otelcol_version in collector/builder-config.yaml). A v0.162.0 tag must build
+  # the 0.162.0 collector. A trailing -e2e.N suffix is allowed so multiple E2E
+  # builds can ship on the same OTel base (v0.162.0-e2e.1). Runs on tag pushes
   # and workflow_dispatch only — branch/PR builds skip it (no tag to verify).
   verify-tag:
     name: Verify tag matches OTel version
@@ -94,7 +94,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version: '1.26.0'
           cache: false
 
       - name: Install libsystemd-dev
@@ -102,7 +102,7 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y libsystemd-dev
 
       - name: Install OTel Collector Builder (ocb)
-        run: go install go.opentelemetry.io/collector/cmd/builder@v0.148.0
+        run: go install go.opentelemetry.io/collector/cmd/builder@v0.162.0
 
       - name: Generate Go source with OCB
         working-directory: collector
