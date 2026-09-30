@@ -52,7 +52,7 @@ jobs:
           echo "✓ tag $REF_TAG matches OTel version $PIN"
 
   build:
-    name: ${{ matrix.binary_name }}
+    name: ${{ matrix.binary_name }} (Go ${{ matrix.go_version }})
     needs: verify-tag
     # verify-tag is skipped on branch/PR builds; `always()` lets build still run
     # there, while a real failure on a tag/dispatch run blocks the release.
@@ -61,9 +61,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        go_version: ['1.27.1', '1.26.8']
+        platform: [linux-amd64, linux-arm64, windows-amd64]
         include:
           # ── Linux x86_64 — native CGO (needs libsystemd for journaldreceiver)
-          - runs_on: ubuntu-latest
+          - platform: linux-amd64
+            runs_on: ubuntu-latest
             goos: linux
             goarch: amd64
             builder_config: builder-config.yaml
@@ -72,7 +75,8 @@ jobs:
             cgo_enabled: "1"
 
           # ── Linux ARM64 — native CGO on GitHub's ARM64 runner
-          - runs_on: ubuntu-24.04-arm
+          - platform: linux-arm64
+            runs_on: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
             builder_config: builder-config.yaml
@@ -81,7 +85,8 @@ jobs:
             cgo_enabled: "1"
 
           # ── Windows x86_64 — cross-compiled from Linux; journaldreceiver excluded
-          - runs_on: ubuntu-latest
+          - platform: windows-amd64
+            runs_on: ubuntu-latest
             goos: windows
             goarch: amd64
             builder_config: builder-config-windows.yaml
@@ -94,7 +99,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.0'
+          go-version: ${{ matrix.go_version }}
           cache: false
 
       - name: Install libsystemd-dev
@@ -122,7 +127,7 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: ${{ matrix.binary_name }}
+          name: ${{ matrix.binary_name }}-go${{ matrix.go_version }}
           path: dist/${{ matrix.binary_name }}
           if-no-files-found: error
 
@@ -149,6 +154,8 @@ jobs:
 
       - uses: actions/download-artifact@v5
         with:
+          # Publish the Go 1.27 build; Go 1.26 is a compatibility check.
+          pattern: '*-go1.27.1'
           path: artifacts/
           merge-multiple: true
 
@@ -202,6 +209,8 @@ jobs:
       - name: Download build artifacts (this run)
         uses: actions/download-artifact@v5
         with:
+          # Publish the Go 1.27 build; Go 1.26 is a compatibility check.
+          pattern: '*-go1.27.1'
           path: artifacts/
           merge-multiple: true
 
