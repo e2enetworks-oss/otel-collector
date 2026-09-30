@@ -1,3 +1,10 @@
+## [Unreleased]
+
+- Use official OpenTelemetry Collector Contrib 0.162.0 archives and verify upstream SHA-256 checksums before installation.
+- Keep E2E registration, configuration, credentials, binary path, and systemd service unchanged.
+- Remove the custom collector manifests, Go build/release pipeline, and mirrored binaries.
+- Validate the VM configuration with the upstream collector in Continuous Integration (CI).
+
 ## [0.148.0] - 2026-06-16
 
 - feat(install): serve install.sh, samples, and binaries from GitHub Pages
