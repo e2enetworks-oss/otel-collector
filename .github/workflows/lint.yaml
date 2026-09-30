@@ -1,35 +1,38 @@
-name: Lint
+name: Installer checks
 
 on:
   push:
-    branches: [main, otel-collector]
+    branches: [main]
   pull_request:
     branches: [main]
 
 jobs:
   lint:
-    name: Lint (shell + go)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go_version: ['1.27.1', '1.26.8']
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
+      - run: make lint
+      - name: Install test tools
+        run: sudo apt-get update -q && sudo apt-get install -y bats jq
+      - run: make test
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: ${{ matrix.go_version }}
-          cache: false
-
-      # shellcheck is preinstalled on ubuntu-latest runners.
-      - name: Show tool versions
-        run: shellcheck --version | head -2
-
-      - name: Lint (shellcheck → go)
-        run: make lint
-
-      - name: Install bats
-        run: sudo apt-get update -q && sudo apt-get install -y bats
-
-      - name: Run bats tests
-        run: make test
+  validate-config:
+    name: Validate configuration with upstream collector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download, verify, and validate upstream collector
+        env:
+          HOST_NAME: ci-host
+          E2E_TOKEN: ci-placeholder
+          E2E_LOG_GROUP: logs.ci
+          E2E_PROJECT_ID: ci-project
+          E2E_AGENT_ID: ci-agent
+          E2E_INTERNAL_GATEWAY: localhost:4317
+        run: |
+          source ./install.sh
+          archive="otelcol-contrib_${OTELCOL_VERSION}_linux_amd64.tar.gz"
+          curl "${CURL_DOWNLOAD_OPTS[@]}" -o "$archive" "${UPSTREAM_RELEASE}/$archive"
+          verify_archive "$archive" "$archive"
+          tar -xzf "$archive" otelcol-contrib
+          ./otelcol-contrib validate --config=samples/vm-config.yaml

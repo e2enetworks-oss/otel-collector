@@ -1,25 +1,7 @@
 name: Publish install assets to GitHub Pages
 
-# Serves the curated install surface at
-# https://e2enetworks-oss.github.io/otel-collector/ :
-#   - site/index.html                  (Pages landing page)
-#   - install.sh                       (the VM installer)
-#   - samples/vm-config.yaml           (reference collector config)
-#   - e2e-otel-collector-linux-amd64   ─┐ mirrored from the latest GitHub
-#   - e2e-otel-collector-linux-arm64    │ Release (Releases stays the origin;
-#   - e2e-otel-collector-windows-amd64.exe ┘ Pages is just a mirror)
-#   - checksums.txt
-#
-# Nothing else from the repo is published — this is a built artifact, not a
-# "deploy from branch" of the whole tree.
-#
-# Two publish paths:
-#   1. Release time → release.yaml's `mirror-pages` job mirrors the freshly built
-#      binaries in the SAME run (no `release: published` hop — GitHub won't trigger
-#      a workflow from a GITHUB_TOKEN-authored release event).
-#   2. site / install.sh / samples change on main → THIS workflow re-deploys
-#      the install assets and re-mirrors the current release binaries so an
-#      asset-only change never wipes the binaries off Pages.
+# Publishes the E2E installer and configuration. Collector archives and
+# checksums are downloaded directly from the official OpenTelemetry release.
 
 on:
   push:
@@ -54,24 +36,6 @@ jobs:
           cp site/index.html       public/index.html
           cp install.sh             public/install.sh
           cp samples/vm-config.yaml public/samples/vm-config.yaml
-
-      - name: Mirror latest release binaries (best-effort)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # Pull binaries + checksums from the most recent release into the Pages
-          # site. Non-fatal: on a fresh repo with no releases yet, install.sh and
-          # samples still publish so the site is never empty.
-          if gh release download --repo "${{ github.repository }}" \
-               --pattern 'e2e-otel-collector-*' \
-               --pattern 'checksums.txt' \
-               --dir public; then
-            echo "✅ Mirrored release binaries"
-          else
-            echo "⚠️  No release assets to mirror yet — publishing install.sh + samples only"
-          fi
-          echo "── Pages site contents ──"
-          find public -type f | sort
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

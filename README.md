@@ -1,10 +1,10 @@
 # E2E OTel Collector
 
-This repository builds the E2E OpenTelemetry Collector and provides an installer. The collector can run on hosts and VMs, or in containers on Kubernetes. The [E2E Networks open source page](https://e2enetworks-oss.github.io/otel-collector/) links to this collector, its downloads, and other public projects.
+This repository provides an E2E installer and configuration for the official OpenTelemetry Collector Contrib distribution (`otelcol-contrib`). It downloads upstream version **0.162.0** and verifies the archive against the upstream SHA-256 checksum before installation. The collector can run on hosts and VMs, or in containers on Kubernetes. The [E2E Networks open source page](https://e2enetworks-oss.github.io/otel-collector/) links to this collector, its downloads, and other public projects.
 
 ## Install on Linux
 
-You need root access, systemd, `curl`, `mktemp`, and either `sha256sum` or `shasum`. Linux amd64 and arm64 are supported. If `jq` is not present, the installer downloads a pinned, checksum-verified copy from GitHub Releases to a temporary directory and removes it afterward.
+You need root access, systemd, `curl`, `tar`, `mktemp`, and either `sha256sum` or `shasum`. Linux amd64 and arm64 are supported. If `jq` is not present, the installer downloads a pinned, checksum-verified copy from GitHub Releases to a temporary directory and removes it afterward.
 
 Create a personal access token in TIR > Personal access token, then run:
 
@@ -31,17 +31,19 @@ E2E_PERSONAL_ACCESS_TOKEN=<token> E2E_API=http://10.0.0.5:31881 \
 
 ## Downloads
 
-The [downloads page](https://e2enetworks-oss.github.io/otel-collector/) provides the installer, VM configuration, Linux binaries, and checksums. Binaries and checksums are mirrored from the latest GitHub Release. The [release workflow](.github/workflows/release.yaml) also builds a Windows amd64 binary.
+The [downloads page](https://e2enetworks-oss.github.io/otel-collector/) provides the E2E installer and VM configuration, with links to the [official upstream archives and checksums](https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v0.162.0). Linux amd64 and arm64 are supported by the installer. Windows binaries are available upstream; this installer requires Linux and systemd.
+
+The existing E2E service name, binary path, registration, credentials, and configuration paths are retained when switching to the upstream binary. We maintain no custom collector components or Go build pipeline. The custom gateway is maintained separately in the observability platform repository.
 
 ## Development
 
-The collector components are defined in `collector/`. The VM configuration is in `samples/vm-config.yaml`, the installer is `install.sh`, and the landing page is `site/index.html`.
+The VM configuration is in `samples/vm-config.yaml`, the installer is `install.sh`, and the landing page is `site/index.html`. The upstream version is pinned by `OTELCOL_VERSION` in `install.sh`; update the download links here and on the landing page when changing it.
 
-Running the local tests requires `jq` and Bats.
+Running the local checks requires ShellCheck, jq, and Bats:
 
 ```bash
 make lint
 make test
 ```
 
-CI builds Linux amd64, Linux arm64, and Windows amd64 binaries. A `v*` tag runs the release workflow. The [Pages workflow](.github/workflows/pages.yaml) republishes the landing page and installer assets after changes on `main`.
+Continuous Integration (CI) runs these checks and validates the VM configuration using the verified upstream collector binary. GitHub Pages publishes the installer and configuration after changes on `main`.

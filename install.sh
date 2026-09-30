@@ -20,9 +20,11 @@ DATA_DIR="/var/lib/e2e-otel-collector"
 SERVICE_NAME="e2e-otel-collector"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-# Published install assets (install.sh, samples/, mirrored release binaries) are
-# served from GitHub Pages — see .github/workflows/pages.yaml.
+# E2E installer and configuration are served from GitHub Pages.
+# Collector archives come directly from the pinned upstream release.
 PAGES_BASE="https://e2enetworks-oss.github.io/otel-collector"
+OTELCOL_VERSION="0.162.0"
+UPSTREAM_RELEASE="https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTELCOL_VERSION}"
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
 # E2E_PERSONAL_ACCESS_TOKEN is the only required customer value. The remaining
@@ -208,6 +210,7 @@ preflight() {
   [ "$(id -u)" -eq 0 ] || error "This script must be run as root (use sudo or run as root)."
   command -v curl      >/dev/null 2>&1 || error "curl is required but not installed."
   command -v systemctl >/dev/null 2>&1 || error "systemctl not found — this installer requires a systemd-based OS."
+  command -v tar      >/dev/null 2>&1 || error "tar is required to unpack the collector archive."
   command -v mktemp   >/dev/null 2>&1 || error "mktemp is required for safe file updates."
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || \
     error "Neither sha256sum nor shasum found — the downloaded binary could not be verified."
@@ -272,24 +275,16 @@ sha256_hex() {
 # sha256_of <file>: echo the file's sha256.
 sha256_of() { sha256_hex < "$1"; }
 
-# checksum_for <checksums-text> <filename>: echo the published sha256 for that
-# file, or nothing when it is not listed. Pure, so bats covers the parsing.
-checksum_for() {
-  echo "$1" | awk -v n="$2" '$2 == n { print $1; exit }'
-}
-
-# verify_binary <file> <published-name>: refuse to install anything whose digest
-# does not match the published one. Fails closed on purpose — an unreachable or
-# incomplete checksums file is a refusal, never a silent unverified install.
-verify_binary() {
-  local file="$1" name="$2" sums expected actual
-  sums=$(curl "${CURL_OPTS[@]}" "${PAGES_BASE}/checksums.txt") \
-    || error "Could not fetch ${PAGES_BASE}/checksums.txt. Refusing to install an unverified binary."
-  expected=$(checksum_for "${sums}" "${name}")
-  [ -n "${expected}" ] || error "No published checksum for ${name}. Refusing to install an unverified binary."
-  actual=$(sha256_of "${file}")
-  [ "${actual}" = "${expected}" ] || \
-    error "Checksum mismatch for ${name}. Expected ${expected}, got ${actual}. Refusing to install."
+# Verify the archive against its upstream release checksum before extracting it.
+verify_archive() {
+  local file="$1" name="$2" expected actual
+  expected=$(curl "${CURL_OPTS[@]}" "${UPSTREAM_RELEASE}/${name}.sha256") || \
+    error "Could not fetch the upstream checksum for ${name}. Refusing to install."
+  [[ "$expected" =~ ^[[:xdigit:]]{64}$ ]] || \
+    error "Invalid upstream checksum for ${name}. Refusing to install."
+  actual=$(sha256_of "$file")
+  [ "$actual" = "${expected,,}" ] || \
+    error "Checksum mismatch for ${name}. Refusing to install."
 }
 
 # detect_arch: map `uname -m` to the Go arch string. Echoes amd64|arm64, or
@@ -391,23 +386,26 @@ register_collector() {
 }
 
 install_binary() {
-  step "Downloading collector binary (linux/${ARCH})"
-  local binary_url="${PAGES_BASE}/e2e-otel-collector-linux-${ARCH}"
-  local binary_tmp
-
-  mkdir -p "$(dirname "${BINARY_PATH}")"
+  step "Downloading upstream otelcol-contrib ${OTELCOL_VERSION} (linux/${ARCH})"
+  local archive="otelcol-contrib_${OTELCOL_VERSION}_linux_${ARCH}.tar.gz"
+  local unpack_dir binary_tmp
+  unpack_dir=$(mktemp -d)
+  TMP_DIRS+=("$unpack_dir")
+  curl "${CURL_DOWNLOAD_OPTS[@]}" -o "${unpack_dir}/${archive}" "${UPSTREAM_RELEASE}/${archive}" || \
+    error "Could not download the upstream collector archive."
+  step "Verifying upstream collector checksum"
+  verify_archive "${unpack_dir}/${archive}" "$archive"
+  tar -xzf "${unpack_dir}/${archive}" -C "$unpack_dir" otelcol-contrib || \
+    error "Could not unpack the upstream collector binary."
+  [ -f "${unpack_dir}/otelcol-contrib" ] && [ ! -L "${unpack_dir}/otelcol-contrib" ] || \
+    error "The upstream archive did not contain a regular collector binary."
+  mkdir -p "$(dirname "$BINARY_PATH")"
   binary_tmp=$(mktemp "${BINARY_PATH}.tmp.XXXXXX")
-  TMP_FILES+=("${binary_tmp}")
-
-  curl "${CURL_DOWNLOAD_OPTS[@]}" -o "${binary_tmp}" "${binary_url}" || \
-    error "Binary download failed from ${binary_url}. Please try again or contact E2E support."
-
-  step "Verifying collector checksum"
-  verify_binary "${binary_tmp}" "e2e-otel-collector-linux-${ARCH}"
-
-  chmod 755 "${binary_tmp}"
-  mv "${binary_tmp}" "${BINARY_PATH}"
-  success "Verified binary installed at ${BINARY_PATH}"
+  TMP_FILES+=("$binary_tmp")
+  cp "${unpack_dir}/otelcol-contrib" "$binary_tmp"
+  chmod 755 "$binary_tmp"
+  mv "$binary_tmp" "$BINARY_PATH"
+  success "Verified upstream collector installed at ${BINARY_PATH}"
 }
 
 write_configuration() {

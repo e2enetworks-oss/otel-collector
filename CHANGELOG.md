@@ -1,7 +1,9 @@
 ## [Unreleased]
 
-- Upgrade Linux and Windows collector components and the OpenTelemetry Collector Builder to 0.162.0.
-- Build and lint with Go 1.27.1 and 1.26.8 in Continuous Integration (CI); publish the Go 1.27.1 binaries.
+- Use official OpenTelemetry Collector Contrib 0.162.0 archives and verify upstream SHA-256 checksums before installation.
+- Keep E2E registration, configuration, credentials, binary path, and systemd service unchanged.
+- Remove the custom collector manifests, Go build/release pipeline, and mirrored binaries.
+- Validate the VM configuration with the upstream collector in Continuous Integration (CI).
 
 ## [0.148.0] - 2026-06-16
 

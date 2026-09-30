@@ -375,26 +375,97 @@ clear_endpoint_env() { unset E2E_API E2E_INTERNAL_GATEWAY; }
 
 # ── checksum verification ────────────────────────────────────────────────────
 
-@test "checksum_for finds the digest for the requested file" {
-  sums="aaa111  e2e-otel-collector-linux-amd64
-bbb222  e2e-otel-collector-linux-arm64"
-  run checksum_for "$sums" "e2e-otel-collector-linux-arm64"
-  [ "$status" -eq 0 ]
-  [ "$output" = "bbb222" ]
+upstream_fixture() {
+  mkdir -p "$STUB_DIR/package" "$STUB_DIR/bin"
+  printf 'official collector fixture' > "$STUB_DIR/package/otelcol-contrib"
+  export MOCK_ARCHIVE="$STUB_DIR/release.tar.gz"
+  tar -czf "$MOCK_ARCHIVE" -C "$STUB_DIR/package" otelcol-contrib
+  export MOCK_HASH
+  MOCK_HASH=$(sha256_of "$MOCK_ARCHIVE")
+  export MOCK_CURL_LOG="$STUB_DIR/curl.log"
+  stub curl <<'EOF'
+#!/usr/bin/env bash
+url="${!#}"
+printf '%s\n' "$url" >> "$MOCK_CURL_LOG"
+case "$url" in
+  *.sha256) printf '%s\n' "$MOCK_HASH" ;;
+  *.tar.gz)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -o ]; then cp "$MOCK_ARCHIVE" "$2"; exit; fi
+      shift
+    done
+    exit 2 ;;
+  *) exit 3 ;;
+esac
+EOF
+  BINARY_PATH="$STUB_DIR/bin/e2e-otelcol"
+  printf 'existing collector' > "$BINARY_PATH"
 }
 
-@test "checksum_for returns nothing for a file that is not listed" {
-  sums="aaa111  e2e-otel-collector-linux-amd64"
-  run checksum_for "$sums" "e2e-otel-collector-windows-amd64.exe"
-  [ "$status" -eq 0 ]
-  [ -z "$output" ]
+install_with_cleanup() {
+  trap cleanup EXIT
+  install_binary
 }
 
-@test "checksum_for does not match on a partial filename" {
-  sums="aaa111  e2e-otel-collector-linux-amd64"
-  run checksum_for "$sums" "linux-amd64"
+@test "upstream archive verification accepts the published digest" {
+  upstream_fixture
+  run verify_archive "$MOCK_ARCHIVE" "release.tar.gz"
   [ "$status" -eq 0 ]
-  [ -z "$output" ]
+  [ "$(cat "$MOCK_CURL_LOG")" = "$UPSTREAM_RELEASE/release.tar.gz.sha256" ]
+}
+
+@test "upstream archive verification refuses malformed checksums" {
+  upstream_fixture
+  MOCK_HASH='not-a-checksum'
+  run verify_archive "$MOCK_ARCHIVE" "release.tar.gz"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Invalid upstream checksum"* ]]
+}
+
+@test "upstream archive verification refuses unavailable checksums" {
+  upstream_fixture
+  stub curl <<'EOF'
+#!/usr/bin/env bash
+exit 22
+EOF
+  run verify_archive "$MOCK_ARCHIVE" "release.tar.gz"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Could not fetch the upstream checksum"* ]]
+}
+
+@test "installer uses pinned official archives for both Linux architectures" {
+  upstream_fixture
+  for ARCH in amd64 arm64; do
+    run install_with_cleanup
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BINARY_PATH")" = 'official collector fixture' ]
+    [ -x "$BINARY_PATH" ]
+    url="$UPSTREAM_RELEASE/otelcol-contrib_${OTELCOL_VERSION}_linux_${ARCH}.tar.gz"
+    grep -Fx "$url" "$MOCK_CURL_LOG"
+    grep -Fx "$url.sha256" "$MOCK_CURL_LOG"
+  done
+}
+
+@test "checksum mismatch preserves the installed collector" {
+  upstream_fixture
+  MOCK_HASH=$(printf '%064d' 0)
+  ARCH=amd64
+  run install_with_cleanup
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Checksum mismatch"* ]]
+  [ "$(cat "$BINARY_PATH")" = 'existing collector' ]
+}
+
+@test "archive without the collector preserves the installed collector" {
+  upstream_fixture
+  printf 'unrelated file' > "$STUB_DIR/package/other"
+  tar -czf "$MOCK_ARCHIVE" -C "$STUB_DIR/package" other
+  MOCK_HASH=$(sha256_of "$MOCK_ARCHIVE")
+  ARCH=amd64
+  run install_with_cleanup
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Could not unpack"* ]]
+  [ "$(cat "$BINARY_PATH")" = 'existing collector' ]
 }
 
 @test "sha256_of computes a known digest" {
